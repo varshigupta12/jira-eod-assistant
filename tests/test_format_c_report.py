@@ -158,18 +158,23 @@ class FormatTests(unittest.TestCase):
         self.assertIn("40% complete", report)
         self.assertNotIn("Progress basis", report)
         self.assertNotIn("story points done", report)
-        self.assertIn("**Blocked** —", report)
-        self.assertIn("**In Deployment** —", report)
+        self.assertIn("Blocked —", report)
+        self.assertIn("In Deployment —", report)
+        self.assertNotIn("**Blocked**", report)
         self.assertNotIn("###", report)
         self.assertNotIn("🔴", report)
         self.assertIn("Blocked for: 2 days 3 hours", report)
         self.assertIn("> *Access approval is pending.*", report)
-        self.assertIn("**Done** —", report)
-        self.assertLess(report.index("**Blocked** —"), report.index("**In Progress** —"))
-        self.assertLess(
-            report.index("**In Progress** —"), report.index("**In Deployment** —")
+        self.assertIn("Done —", report)
+        self.assertIn(
+            "> *Access approval is pending.*\n\nIn Progress —",
+            report,
         )
-        self.assertLess(report.index("**In Deployment** —"), report.index("**Done** —"))
+        self.assertLess(report.index("Blocked —"), report.index("In Progress —"))
+        self.assertLess(
+            report.index("In Progress —"), report.index("In Deployment —")
+        )
+        self.assertLess(report.index("In Deployment —"), report.index("Done —"))
         self.assertIn("ENG-1", report)
         self.assertNotIn("No update", report)
 
