@@ -1,0 +1,48 @@
+version: 1
+
+teams:
+  - id: platform
+    name: Platform
+    projects: [PLAT]
+    filters: ["Platform delivery board"]
+    boards: [101]
+    daily:
+      time: "17:00"
+      timezone: America/New_York
+
+  - id: services
+    name: Services
+    projects: [SVC]
+    filters: ["Services sprint board"]
+    boards: [202]
+    daily:
+      time: "17:00"
+      timezone: Europe/London
+
+  - id: mobile
+    name: Mobile
+    projects: [APP]
+    filters: ["Mobile delivery board"]
+    boards: [303]
+    daily:
+      time: "18:00"
+      timezone: Asia/Kolkata
+
+ai:
+  enabled: true
+  model: openai/gpt-5-mini
+  max_tokens: 2048
+
+pulse:
+  enabled: true
+  title: Engineering Sprint Pulse
+  timezone: America/New_York
+  weekday: friday
+  time: "20:00"
+  cadence_days: 14
+  anchor_date: "2026-01-09"
+
+blocked_statuses: [Blocked, Impediment]
+deploy_statuses: [To Be Deployed, Ready for Deployment, Ready to Deploy]
+done_statuses: [Done, Closed, Resolved]
+review_statuses: [In Review, Code Review]

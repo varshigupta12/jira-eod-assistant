@@ -1,0 +1,57 @@
+name: Jira EOD Daily Report
+
+on:
+  # Add schedule entries only in a private deployment fork. Action logs in a
+  # public repository can expose operational metadata when a request fails.
+  workflow_dispatch:
+    inputs:
+      team_id:
+        description: Team ID from report-config.yml; leave blank to run all
+        required: false
+        type: string
+      dry_run:
+        description: Query Jira and log counts without posting to Mattermost
+        required: false
+        default: false
+        type: boolean
+      report_format:
+        description: Report grouping format
+        required: false
+        default: c
+        type: choice
+        options:
+          - c
+
+permissions:
+  contents: read
+
+jobs:
+  run-eod-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --require-hashes --requirement requirements.txt
+
+      - name: Generate and post due EOD reports
+        env:
+          JIRA_DOMAIN: ${{ secrets.JIRA_DOMAIN }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          MATTERMOST_WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
+          TEAM_ID: ${{ inputs.team_id }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          REPORT_FORMAT: ${{ inputs.report_format }}
+        run: python daily_runner.py
