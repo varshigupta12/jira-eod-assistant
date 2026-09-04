@@ -336,9 +336,9 @@ class HighlightTests(unittest.TestCase):
         self.assertLess(report.index("**Services"), report.index("**Mobile"))
         self.assertIn("**[ENG-100]", report)
         self.assertIn("40% complete", report)
-        self.assertIn("**Done** — [ENG-1]", report)
+        self.assertIn("Done — [ENG-1]", report)
         self.assertIn("> *Completed migration.*", report)
-        self.assertIn("**In Progress** — [ENG-2]", report)
+        self.assertIn("In Progress — [ENG-2]", report)
         self.assertEqual(report.count("> *"), 1)
 
     def test_posts_report_as_one_message(self):

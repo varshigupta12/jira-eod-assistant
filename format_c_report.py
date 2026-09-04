@@ -515,7 +515,7 @@ def format_format_c_group_lines(
             )
             category = _issue_category(issue, config)
             row = (
-                f"**{category}** — [{key}]({ticket_url}) {summary} "
+                f"{category} — [{key}]({ticket_url}) {summary} "
                 f"— {assignee}"
             )
             ai_update = enriched.get(key)
@@ -540,6 +540,7 @@ def format_format_c_group_lines(
                 lines.append(row)
                 if update_line:
                     lines.append(update_line)
+                    lines.append("")
         lines.append("")
     return lines
 
