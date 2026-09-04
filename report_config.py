@@ -21,6 +21,7 @@ class DailySchedule:
     time: time
     timezone: ZoneInfo
     weekdays: frozenset[int]
+    report_format: str
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,7 @@ WEEKDAYS = {
     "saturday": 5,
     "sunday": 6,
 }
+DAILY_REPORT_FORMATS = frozenset({"epic", "status", "assignee"})
 
 
 def nominal_schedule_time(now: datetime, schedule: str | None) -> datetime:
@@ -226,6 +228,14 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                 raise ReportConfigError(
                     f"{path_prefix}.daily.time must be on the hour"
                 )
+            report_format = _string(
+                daily.get("format", "epic"), f"{path_prefix}.daily.format"
+            ).casefold()
+            if report_format not in DAILY_REPORT_FORMATS:
+                raise ReportConfigError(
+                    f"{path_prefix}.daily.format must be one of: "
+                    f"{', '.join(sorted(DAILY_REPORT_FORMATS))}"
+                )
             daily_schedule = DailySchedule(
                 time=daily_time,
                 timezone=_zone(
@@ -235,6 +245,7 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                     _weekday(day, f"{path_prefix}.daily.weekdays[]")
                     for day in weekday_values
                 ),
+                report_format=report_format,
             )
 
         team_field = _string(
@@ -259,10 +270,18 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
             )
         projects = _strings(item.get("projects"), f"{path_prefix}.projects")
         filters = _strings(item.get("filters"), f"{path_prefix}.filters")
-        if daily_schedule and not (projects or filters):
-            raise ReportConfigError(
-                f"{path_prefix} needs projects or filters for daily reports"
-            )
+        if daily_schedule:
+            if daily_schedule.report_format == "epic" and not board_values:
+                raise ReportConfigError(
+                    f"{path_prefix}.boards is required for daily.format epic"
+                )
+            if daily_schedule.report_format != "epic" and not (
+                projects or filters or (team_field and team_value)
+            ):
+                raise ReportConfigError(
+                    f"{path_prefix} needs projects, filters, or a Team-field "
+                    f"mapping for daily.format {daily_schedule.report_format}"
+                )
         teams.append(
             Team(
                 id=team_id,

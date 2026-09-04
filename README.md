@@ -3,7 +3,7 @@
 Serverless Jira status reporting for Mattermost. GitHub Actions collects recent
 work from any number of Jira teams, creates concise updates, and posts:
 
-- daily EOD reports grouped by Epic in Format C;
+- daily EOD reports grouped by Epic, status, or assignee;
 - sprint-end highlights grouped by region and Epic in Format C.
 
 No Jira administrator access or hosted infrastructure is required. For live
@@ -15,6 +15,7 @@ metadata when external API requests fail.
 - Any number of teams, projects, saved filters, and Scrum boards
 - One or multiple boards per team
 - Team-local schedules with daylight-saving support
+- Per-team Epic, status, or assignee report formats with manual overrides
 - Jira Cloud REST API authentication using a personal API token
 - Mattermost incoming-webhook delivery
 - Atlassian Document Format comment support
@@ -29,7 +30,7 @@ GitHub Actions
     |
     +-- daily-runner check
     |      +-- teams due in their local timezone
-    |      +-- Jira saved filter/project query
+    |      +-- Jira board, saved-filter, or project query
     |      +-- optional OpenRouter summary
     |      `-- Mattermost EOD post
     |
@@ -79,9 +80,9 @@ In **Actions**:
 
 - Run **Jira EOD Daily Report**. Leave `team_id` blank to run every team with a
   daily schedule, or enter one configured team ID. Enable `dry_run` to inspect
-  the   active-sprint result count without posting to Mattermost. Daily reports
-  use Format C exclusively: Epic progress headings followed by compact Done,
-  Blocked, In Review, and In Progress ticket lines.
+  the aggregate result count without posting to Mattermost. Leave
+  `report_format` set to `configured` to use each team's YAML setting, or select
+  `epic`, `status`, or `assignee` as a one-run override.
 - Run **Sprint Highlights Report** to bypass the cadence check and post a
   combined region- and Epic-grouped Format C report immediately.
 
@@ -102,6 +103,7 @@ teams:
     projects: [PLAT]
     boards: [123]
     daily:
+      format: epic
       time: "17:00"
       timezone: America/New_York
 
@@ -124,6 +126,7 @@ teams:
     filters: ["Backend delivery board"]
     boards: [101, 102]
     daily:
+      format: status
       time: "17:00"
       timezone: Europe/London
       weekdays: [monday, tuesday, wednesday, thursday, friday]
@@ -134,6 +137,7 @@ teams:
     filters: ["Mobile sprint filter"]
     boards: [201]
     daily:
+      format: assignee
       time: "18:00"
       timezone: Asia/Kolkata
 
@@ -166,12 +170,27 @@ review_statuses: [In Review, Code Review]
 | `projects` | For project filtering | One project key or a list |
 | `filters` | For saved-filter filtering | One Jira saved-filter name/ID or a list |
 | `boards` | For sprint reports | One board ID or a list |
-| `daily` | No | Local time, IANA timezone, and optional weekdays |
+| `daily` | No | Format, local time, IANA timezone, and optional weekdays |
 | `include_in_pulse` | No | Defaults to `true`; set `false` to omit the team |
 | `team_field` / `team_value` | No | Alternative when a Jira Team field is queryable |
 
 When projects and filters are both present, issues must match both. Multiple
 values within either list are ORed. Schedule times must be on the hour.
+
+### Daily report formats
+
+Set `daily.format` independently for each team:
+
+| Value | Output | Required team configuration |
+| --- | --- | --- |
+| `epic` | Epic progress followed by status-ordered ticket updates | `boards` |
+| `status` | Tickets grouped by Blocked, In Progress, In Review, In Deployment, and Done | `projects`, `filters`, or a Team-field mapping |
+| `assignee` | Tickets grouped by Jira assignee | `projects`, `filters`, or a Team-field mapping |
+
+`epic` is the default when `daily.format` is omitted. Invalid combinations fail
+during configuration loading with a team-specific error. The workflow's
+`configured` option honors these defaults; the other options override the
+format for only that manual run.
 
 Find a board ID in its URL: `.../jira/software/c/projects/KEY/boards/123`.
 
@@ -233,6 +252,12 @@ Run one team:
 
 ```bash
 DAILY_FORCE_RUN=true TEAM_ID=services python daily_runner.py
+```
+
+Override that team's configured format for one run:
+
+```bash
+DAILY_FORCE_RUN=true TEAM_ID=services REPORT_FORMAT=assignee python daily_runner.py
 ```
 
 Run the sprint report:

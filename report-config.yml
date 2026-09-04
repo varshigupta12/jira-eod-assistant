@@ -7,6 +7,7 @@ teams:
     filters: ["Platform delivery board"]
     boards: [101]
     daily:
+      format: epic
       time: "17:00"
       timezone: America/New_York
 
@@ -16,6 +17,7 @@ teams:
     filters: ["Services sprint board"]
     boards: [202]
     daily:
+      format: status
       time: "17:00"
       timezone: Europe/London
 
@@ -25,6 +27,7 @@ teams:
     filters: ["Mobile delivery board"]
     boards: [303]
     daily:
+      format: assignee
       time: "18:00"
       timezone: Asia/Kolkata
 
