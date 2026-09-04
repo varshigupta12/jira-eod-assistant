@@ -13,7 +13,11 @@ import requests
 from eod_report import (
     Config,
     EODReportError,
+    fetch_jira_tickets,
+    filter_issues_with_recent_activity,
     generate_ai_updates,
+    parse_and_format,
+    parse_and_format_by_status,
     send_to_mattermost,
 )
 from format_c_report import format_format_c, load_format_c_groups
@@ -54,9 +58,35 @@ def teams_due(
 
 def requested_report_format(value: str | None) -> str:
     """Normalize an optional workflow input to a supported report format."""
-    report_format = (value or "").strip().casefold() or "c"
-    if report_format != "c":
-        raise EODReportError("REPORT_FORMAT must be 'c'")
+    report_format = (value or "").strip().casefold() or "configured"
+    if report_format not in {"configured", "epic", "status", "assignee"}:
+        raise EODReportError(
+            "REPORT_FORMAT must be 'configured', 'epic', 'status', or 'assignee'"
+        )
+    return report_format
+
+
+def report_format_for_team(requested: str, team: Team) -> str:
+    """Apply a manual override or return the team's configured daily format."""
+    if requested == "configured":
+        if not team.daily_schedule:
+            raise EODReportError(
+                f"{team.name} has no daily format; select a report-format override"
+            )
+        report_format = team.daily_schedule.report_format
+    else:
+        report_format = requested
+    if report_format == "epic" and not team.board_ids:
+        raise EODReportError(f"{team.name} needs a board for epic reports")
+    if report_format != "epic" and not (
+        team.projects
+        or team.filters
+        or (team.team_field and team.team_value)
+    ):
+        raise EODReportError(
+            f"{team.name} needs a project, filter, or Team-field mapping "
+            f"for {report_format} reports"
+        )
     return report_format
 
 
@@ -128,7 +158,7 @@ def main() -> int:
             "true",
             "yes",
         }
-        requested_report_format(os.getenv("REPORT_FORMAT"))
+        requested_format = requested_report_format(os.getenv("REPORT_FORMAT"))
         now = datetime.now(timezone.utc)
         evaluation_time = (
             nominal_schedule_time(now, os.getenv("GITHUB_EVENT_SCHEDULE"))
@@ -146,7 +176,7 @@ def main() -> int:
             return 0
 
         client = requests.Session()
-        pulse_config = PulseConfig.from_env()
+        pulse_config = None
         report_count = 0
         for team in selected:
             config = Config.from_env(
@@ -163,25 +193,49 @@ def main() -> int:
                 )
             )
             print(f"Processing EOD report for team: {team.name}...")
-            groups, sprint_names = load_format_c_groups(
-                team, config, pulse_config, client
-            )
-            active = [issue for group in groups for issue in group.issues]
-            print(
-                f"{len(active)} active-sprint issue(s) had a recent comment "
-                "or status change."
-            )
-            if dry_run:
-                continue
-            ai_updates = generate_updates_with_fallback(
-                active,
-                config,
-                client,
-                include_all_started=True,
-            )
-            report = format_format_c(
-                groups, sprint_names, config, ai_updates
-            )
+            current_format = report_format_for_team(requested_format, team)
+            print(f"Using {current_format} report format.")
+            if current_format == "epic":
+                pulse_config = pulse_config or PulseConfig.from_env()
+                groups, sprint_names = load_format_c_groups(
+                    team, config, pulse_config, client
+                )
+                issues = [issue for group in groups for issue in group.issues]
+                print(
+                    f"{len(issues)} active-sprint issue(s) had a recent comment "
+                    "or status change."
+                )
+                if dry_run:
+                    continue
+                ai_updates = generate_updates_with_fallback(
+                    issues,
+                    config,
+                    client,
+                    include_all_started=True,
+                )
+                report = format_format_c(
+                    groups, sprint_names, config, ai_updates
+                )
+            else:
+                issues = fetch_jira_tickets(config, client)
+                if current_format == "status":
+                    issues = filter_issues_with_recent_activity(
+                        issues, config, client
+                    )
+                print(f"{len(issues)} issue(s) matched the daily report.")
+                if dry_run:
+                    continue
+                ai_updates = generate_updates_with_fallback(
+                    issues,
+                    config,
+                    client,
+                    include_all_started=current_format == "status",
+                )
+                report = (
+                    parse_and_format_by_status(issues, config, ai_updates)
+                    if current_format == "status"
+                    else parse_and_format(issues, config, ai_updates)
+                )
             send_to_mattermost(report, config, client)
             report_count += 1
     except (EODReportError, ReportConfigError) as exc:

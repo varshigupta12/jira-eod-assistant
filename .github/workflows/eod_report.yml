@@ -15,12 +15,15 @@ on:
         default: false
         type: boolean
       report_format:
-        description: Report grouping format
+        description: Use each team's configured format or override it
         required: false
-        default: c
+        default: configured
         type: choice
         options:
-          - c
+          - configured
+          - epic
+          - status
+          - assignee
 
 permissions:
   contents: read

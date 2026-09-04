@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from daily_runner import (
     generate_updates_with_fallback,
+    report_format_for_team,
     requested_report_format,
     team_environment,
     teams_due,
@@ -29,6 +30,7 @@ teams:
     filters: [Core board, Operations board]
     boards: [101, 202]
     daily:
+      format: status
       time: "17:00"
       timezone: Europe/London
       weekdays: [monday, friday]
@@ -64,6 +66,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual([team.id for team in settings.teams], ["core", "docs"])
         self.assertEqual(settings.team("core").projects, ("CORE", "OPS"))
         self.assertEqual(settings.team("core").board_ids, (101, 202))
+        self.assertEqual(
+            settings.team("core").daily_schedule.report_format, "status"
+        )
         self.assertEqual(settings.pulse.title, "Engineering Pulse")
 
     def test_rejects_duplicate_team_ids(self):
@@ -95,14 +100,66 @@ class ConfigTests(unittest.TestCase):
             ["core"],
         )
 
-    def test_daily_report_format_is_always_format_c(self):
-        self.assertEqual(requested_report_format(""), "c")
-        self.assertEqual(requested_report_format(None), "c")
-        self.assertEqual(requested_report_format("c"), "c")
+    def test_uses_configured_format_by_default_and_allows_overrides(self):
+        team = self.load().team("core")
+
+        self.assertEqual(requested_report_format(""), "configured")
+        self.assertEqual(requested_report_format(None), "configured")
+        self.assertEqual(
+            report_format_for_team(requested_report_format("configured"), team),
+            "status",
+        )
+        for report_format in ("epic", "status", "assignee"):
+            self.assertEqual(
+                report_format_for_team(
+                    requested_report_format(report_format), team
+                ),
+                report_format,
+            )
 
     def test_rejects_unknown_report_format(self):
         with self.assertRaisesRegex(EODReportError, "REPORT_FORMAT"):
             requested_report_format("unknown")
+
+    def test_defaults_daily_format_to_epic(self):
+        settings = self.load(CONFIG.replace("      format: status\n", ""))
+
+        self.assertEqual(
+            settings.team("core").daily_schedule.report_format, "epic"
+        )
+
+    def test_rejects_unknown_configured_format(self):
+        invalid = CONFIG.replace("format: status", "format: people")
+
+        with self.assertRaisesRegex(ReportConfigError, "daily.format"):
+            self.load(invalid)
+
+    def test_epic_format_requires_a_board(self):
+        invalid = (
+            CONFIG.replace("    boards: [101, 202]\n", "")
+            .replace("      format: status", "      format: epic")
+            .replace("pulse:\n  enabled: true", "pulse:\n  enabled: false")
+        )
+
+        with self.assertRaisesRegex(ReportConfigError, "boards.*daily.format epic"):
+            self.load(invalid)
+
+    def test_epic_override_requires_a_board(self):
+        team = self.load().team("core")
+        without_boards = team.__class__(
+            id=team.id,
+            name=team.name,
+            projects=team.projects,
+            filters=team.filters,
+            board_ids=(),
+            team_field=team.team_field,
+            team_value=team.team_value,
+            daily_schedule=team.daily_schedule,
+            include_in_pulse=team.include_in_pulse,
+        )
+
+        with self.assertRaisesRegex(EODReportError, "needs a board"):
+            report_format_for_team("epic", without_boards)
 
     def test_builds_generic_team_environment(self):
         settings = self.load()
