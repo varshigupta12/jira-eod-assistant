@@ -4,7 +4,8 @@ Serverless Jira status reporting for Mattermost. GitHub Actions collects recent
 work from any number of Jira teams, creates concise updates, and posts:
 
 - daily EOD reports grouped by Epic, status, or assignee;
-- sprint-end highlights grouped by region and Epic in Format C.
+- sprint-end highlights grouped by region and Epic in Format C;
+- current-release blockers grouped by team and ordered by blocked duration.
 
 No Jira administrator access or hosted infrastructure is required. For live
 use, deploy from a private fork because Actions logs can reveal operational
@@ -21,6 +22,7 @@ metadata when external API requests fail.
 - Atlassian Document Format comment support
 - Optional OpenRouter summaries grounded in Jira descriptions and comments
 - Configurable sprint-report title, cadence, timezone, and status names
+- Release matching through either Jira labels or Fix Version/s
 - Manual GitHub Actions runs for safe setup testing
 
 ## How it works
@@ -38,7 +40,8 @@ GitHub Actions
            +-- teams and boards from report-config.yml
            +-- active/recent sprint issues
            +-- AI-selected done/blocked/carryover highlights
-           `-- combined Mattermost sprint post
+           +-- combined Mattermost sprint post
+           `-- optional current-release blocker post
 ```
 
 The public source workflows are manual-only by default. Configure scheduling in
@@ -83,8 +86,9 @@ In **Actions**:
   the aggregate result count without posting to Mattermost. Leave
   `report_format` set to `configured` to use each team's YAML setting, or select
   `epic`, `status`, or `assignee` as a one-run override.
-- Run **Sprint Highlights Report** to bypass the cadence check and post a
-  combined region- and Epic-grouped Format C report immediately.
+- Run **Sprint Highlights Report** with `full` to post the sprint report followed
+  by current-release blockers, or use `blocked-only` to post only the blocker
+  report.
 
 Add scheduling only in the private deployment repository after testing.
 
@@ -111,6 +115,9 @@ ai:
   enabled: false
 
 pulse:
+  enabled: false
+
+release_blockers:
   enabled: false
 ```
 
@@ -154,6 +161,10 @@ pulse:
   time: "20:00"
   cadence_days: 14
   anchor_date: "2026-08-14"
+
+release_blockers:
+  enabled: true
+  label: "2026.1"
 
 blocked_statuses: [Blocked, Impediment, On Hold]
 deploy_statuses: [Ready for Deployment, To Be Deployed]
@@ -219,12 +230,40 @@ The sprint workflow:
 3. Classifies issues as done, blocked, or carryover.
 4. Uses OpenRouter to select only material highlights.
 5. Posts one report with sections in the same order as `teams`.
+6. When enabled, posts a separate current-release blocker report afterward.
 
 If OpenRouter fails, the sprint report falls back to each ticket's latest Jira
 comment, or its summary when no comment exists.
 
 `anchor_date` must be a date when a report should run. `cadence_days: 14`
 creates an alternate-Friday schedule. Manual runs ignore the cadence.
+
+### Current-release blocker report
+
+Enable `release_blockers` and set `label` to the current release identifier:
+
+```yaml
+release_blockers:
+  enabled: true
+  label: "2026.1"
+```
+
+A blocked ticket is included when its current status matches
+`blocked_statuses`, it matches a configured team's project/filter criteria, and
+either its Jira label or **Fix Version/s** equals the configured release value.
+The report:
+
+- includes matching blockers even when they are outside the sprint;
+- groups tickets by team and keeps the first team when filters overlap;
+- orders each team from longest blocked to shortest blocked;
+- shows ticket, summary, assignee, continuous blocked duration, and an explicit
+  AI-derived blocker reason when one is available;
+- uses compact bullets and splits safely when Mattermost's post limit is reached;
+- is skipped when no current-release blockers exist.
+
+Update `release_blockers.label` at each release rollover. The public workflow is
+manual-only; a private deployment can schedule `full` mode to post this report
+immediately after each sprint pulse.
 
 ## Run locally
 
@@ -266,6 +305,12 @@ Run the sprint report:
 PULSE_FORCE_RUN=true python pulse_report.py
 ```
 
+Run only the current-release blocker report:
+
+```bash
+PULSE_FORCE_RUN=true PULSE_REPORT_MODE=blocked-only python pulse_report.py
+```
+
 Use another configuration file with `REPORT_CONFIG=/path/to/config.yml`.
 
 ## Permissions
@@ -274,7 +319,8 @@ The Jira account needs permission to:
 
 - browse configured projects and issues;
 - view configured saved filters and boards;
-- view comments.
+- view comments and issue history;
+- view labels and Fix Version/s values.
 
 The reporter does not modify Jira data.
 
@@ -283,8 +329,9 @@ The reporter does not modify Jira data.
 - Never commit `.env` files, API tokens, or webhook URLs.
 - Use a dedicated Atlassian account with least-privilege project access when
   possible.
-- Jira summaries, descriptions, statuses, and recent comments are sent to the
-  selected OpenRouter model when AI is enabled.
+- Jira summaries, descriptions, statuses, recent comments, and comments from a
+  ticket's current blocked period are sent to the selected OpenRouter model when
+  AI is enabled.
 - Review your organization's data-handling requirements before enabling AI.
 - GitHub Actions secrets are masked and are not passed to pull requests from
   forks.

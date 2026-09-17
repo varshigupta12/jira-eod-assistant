@@ -395,6 +395,90 @@ def get_recent_comments(
     return [text for _, text in sorted(recent)]
 
 
+def _comment_entries(
+    comments_data: Mapping[str, Any] | None,
+) -> list[tuple[datetime, str]]:
+    if not comments_data:
+        return []
+    comments = comments_data.get("comments", [])
+    if not isinstance(comments, list):
+        return []
+    entries = []
+    for comment in comments:
+        if not isinstance(comment, dict) or not comment.get("created"):
+            continue
+        try:
+            created = _parse_jira_datetime(str(comment["created"]))
+        except ValueError:
+            continue
+        text = comment_body_to_text(comment.get("body", ""))
+        if text:
+            entries.append((created, text))
+    return sorted(entries)
+
+
+def _fetch_issue_comments(
+    issue_key: str,
+    config: Config,
+    session: requests.Session,
+) -> Mapping[str, Any]:
+    """Fetch all Jira comments when the embedded comment field is truncated."""
+    url = (
+        f"{config.jira_base_url}/rest/api/3/issue/"
+        f"{quote(issue_key, safe='-')}/comment"
+    )
+    start_at = 0
+    comments: list[Mapping[str, Any]] = []
+    while True:
+        try:
+            response = session.get(
+                url,
+                headers={"Accept": "application/json"},
+                auth=(config.jira_email, config.jira_api_token),
+                params={"startAt": start_at, "maxResults": 100},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise EODReportError(
+                "Failed to fetch Jira comments: "
+                f"{request_error_summary(exc)}"
+            ) from exc
+        page = data.get("comments", [])
+        if not isinstance(page, list):
+            raise EODReportError(f"Jira returned invalid comments for {issue_key}")
+        comments.extend(item for item in page if isinstance(item, dict))
+        start_at += len(page)
+        total = data.get("total")
+        if not page or not isinstance(total, int) or start_at >= total:
+            return {"comments": comments}
+
+
+def _issue_comments(
+    issue: Mapping[str, Any],
+    config: Config,
+    session: requests.Session,
+) -> Mapping[str, Any] | None:
+    fields = issue.get("fields")
+    if not isinstance(fields, dict):
+        return None
+    embedded = fields.get("comment")
+    if not isinstance(embedded, dict):
+        return None
+    comments = embedded.get("comments", [])
+    total = embedded.get("total")
+    if (
+        isinstance(comments, list)
+        and isinstance(total, int)
+        and total > len(comments)
+    ):
+        return _fetch_issue_comments(
+            str(issue.get("key") or "Unknown"), config, session
+        )
+    return embedded
+
+
 def _fetch_issue_changelog(
     issue_key: str,
     config: Config,
@@ -587,14 +671,37 @@ class AIUpdate:
     blocker_reason: str
 
 
-def _ai_issue_context(issue: Mapping[str, Any]) -> dict[str, Any]:
+def _ai_issue_context(
+    issue: Mapping[str, Any], blocked_period_only: bool = False
+) -> dict[str, Any]:
     fields = issue.get("fields")
     if not isinstance(fields, dict):
         raise EODReportError("Jira issue is missing its fields object")
     status = fields.get("status")
     comment_data = fields.get("comment")
     comments = comment_data if isinstance(comment_data, dict) else None
-    return {
+    blocked_since = issue.get("_eod_blocked_since")
+    try:
+        blocked_since_at = (
+            _parse_jira_datetime(blocked_since)
+            if isinstance(blocked_since, str)
+            else None
+        )
+    except ValueError:
+        blocked_since_at = None
+    blocked_period_comments = []
+    if blocked_since_at:
+        blocked_period_comments = [
+            {"timestamp": timestamp.isoformat(), "text": text}
+            for timestamp, text in _comment_entries(comments)
+            if timestamp >= blocked_since_at
+        ]
+        if len(blocked_period_comments) > 10:
+            blocked_period_comments = [
+                blocked_period_comments[0],
+                *blocked_period_comments[-9:],
+            ]
+    context = {
         "key": str(issue.get("key", "Unknown")),
         "summary": str(fields.get("summary") or "No summary")[:500],
         "description": comment_body_to_text(fields.get("description", ""))[:4000],
@@ -604,9 +711,15 @@ def _ai_issue_context(issue: Mapping[str, Any]) -> dict[str, Any]:
             else "Unknown"
         ),
         "recent_comments": get_recent_comments(comments)[-10:],
+        "blocked_period_comments": blocked_period_comments,
         "latest_comment": get_latest_comment(comments),
         "recent_status_change": issue.get("_eod_status_change"),
     }
+    if blocked_period_only:
+        context["description"] = ""
+        context["recent_comments"] = []
+        context["latest_comment"] = None
+    return context
 
 
 def _ai_response_schema() -> dict[str, Any]:
@@ -643,16 +756,6 @@ def _ai_response_schema() -> dict[str, Any]:
 
 
 def _openrouter_error_message(exc: requests.RequestException) -> str:
-    response = exc.response
-    if response is None:
-        return request_error_summary(exc)
-    try:
-        payload = response.json()
-        error = payload.get("error")
-        if isinstance(error, dict) and isinstance(error.get("message"), str):
-            return f"HTTP {response.status_code}: {error['message'][:500]}"
-    except ValueError:
-        pass
     return request_error_summary(exc)
 
 
@@ -711,6 +814,7 @@ def generate_ai_updates(
     config: Config,
     session: requests.Session | None = None,
     include_all_started: bool = False,
+    include_all_blocked: bool = False,
 ) -> dict[str, AIUpdate]:
     """Use OpenRouter to turn Jira context into concise, grounded updates."""
     if not config.ai_summarize:
@@ -725,8 +829,6 @@ def generate_ai_updates(
     client = session or requests.Session()
     contexts = []
     for issue in issues:
-        if not _is_started(issue):
-            continue
         fields = issue.get("fields")
         if not isinstance(fields, dict):
             raise EODReportError("Jira issue is missing its fields object")
@@ -736,12 +838,17 @@ def generate_ai_updates(
             if isinstance(status_data, dict)
             else "unknown"
         )
+        is_release_blocker = include_all_blocked and status in config.blocked_statuses
+        if not _is_started(issue) and not is_release_blocker:
+            continue
         assignee = fields.get("assignee")
         comment_data = fields.get("comment")
         recent_comment = get_recent_comment(
             comment_data if isinstance(comment_data, dict) else None
         )
-        if include_all_started:
+        if is_release_blocker:
+            pass
+        elif include_all_started:
             latest_comment = get_latest_comment(
                 comment_data if isinstance(comment_data, dict) else None
             )
@@ -753,7 +860,9 @@ def generate_ai_updates(
             not isinstance(assignee, dict) and not recent_comment
         ):
             continue
-        contexts.append(_ai_issue_context(issue))
+        contexts.append(
+            _ai_issue_context(issue, blocked_period_only=is_release_blocker)
+        )
     updates: dict[str, AIUpdate] = {}
     for offset in range(0, len(contexts), 8):
         batch = contexts[offset : offset + 8]
@@ -766,6 +875,8 @@ def generate_ai_updates(
             "phrases such as 'the team reported'. Use only facts in the summary, "
             "description, status, and recent comments. Do not infer work, causes, "
             "owners, dates, or dependencies that are not explicit. For blocked "
+            "issues, use blocked_period_comments to identify an explicit cause "
+            "recorded earlier in the current blocked period. For blocked "
             "issues, blocker_reason must be at most 20 words and state the explicit "
             "cause, dependency, and needed action when available. If no blocker is "
             "explicit, set blocker_reason to an empty string. For issues whose current "

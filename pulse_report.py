@@ -34,6 +34,7 @@ from report_config import (
     load_report_config,
     nominal_schedule_time,
 )
+from release_blocker_report import post_release_blocker_report
 
 PULSE_TIMEZONE = ZoneInfo("America/New_York")
 MAX_HIGHLIGHTS_PER_CATEGORY = 3
@@ -76,7 +77,7 @@ class PulseConfig:
         settings = load_report_config(values.get("REPORT_CONFIG"))
         required = (
             ("JIRA_DOMAIN", "JIRA_EMAIL", "JIRA_API_TOKEN", "MATTERMOST_WEBHOOK_URL")
-            if settings.pulse.enabled
+            if settings.pulse.enabled or settings.release_blockers.enabled
             else ()
         )
         missing = [name for name in required if not values.get(name, "").strip()]
@@ -650,7 +651,22 @@ def send_pulse_to_mattermost(
 
 def main() -> int:
     try:
+        settings = load_report_config()
+        report_mode = os.getenv("PULSE_REPORT_MODE", "full").strip().casefold()
+        if report_mode not in {"full", "blocked-only"}:
+            raise EODReportError(
+                "PULSE_REPORT_MODE must be 'full' or 'blocked-only'"
+            )
         config = PulseConfig.from_env()
+        client = requests.Session()
+        if report_mode == "blocked-only":
+            post_release_blocker_report(
+                settings,
+                config.jira_base_url,
+                config.mattermost_webhook_url,
+                client,
+            )
+            return 0
         if not config.teams:
             print("Pulse reporting is disabled or has no configured teams.")
             return 0
@@ -669,7 +685,6 @@ def main() -> int:
             print("Sprint report is not due for this schedule.")
             return 0
 
-        client = requests.Session()
         reports = {}
         story_point_fields, epic_link_fields = _field_ids(config, client)
         format_c_fields = (
@@ -733,6 +748,12 @@ def main() -> int:
             )
         report = format_pulse_report(reports, config)
         send_pulse_to_mattermost(report, config, client)
+        post_release_blocker_report(
+            settings,
+            config.jira_base_url,
+            config.mattermost_webhook_url,
+            client,
+        )
     except (EODReportError, ReportConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
