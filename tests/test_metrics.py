@@ -2,6 +2,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 
 from metrics import (
+    StatusInterval,
     carry_over_count,
     continuous_entry,
     current_status_age,
@@ -256,6 +257,25 @@ class FlowEfficiencyTests(unittest.TestCase):
         )
 
         self.assertIsNone(flow_efficiency(intervals, BLOCKED, DONE, NOW))
+
+    def test_excludes_backlog_before_the_first_active_status(self):
+        intervals = (
+            StatusInterval("To Do", at(1), at(5)),
+            StatusInterval("In Progress", at(5), at(7)),
+            StatusInterval("Blocked", at(7), at(8)),
+            StatusInterval("Done", at(8), None),
+        )
+
+        self.assertAlmostEqual(
+            flow_efficiency(
+                intervals,
+                BLOCKED,
+                DONE,
+                NOW,
+                started_statuses=("In Progress",),
+            ),
+            2 / 3,
+        )
 
 
 class StatisticsTests(unittest.TestCase):

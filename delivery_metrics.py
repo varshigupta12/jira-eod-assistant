@@ -12,6 +12,7 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
+from urllib.parse import quote
 
 import requests
 
@@ -47,6 +48,7 @@ from snapshot_store import (
 
 BASE_FIELDS = "summary,assignee,status,created,resolutiondate,fixVersions,labels"
 CHANGELOG_PAGE_SIZE = 100
+MAX_RELEASES = 6
 
 
 @dataclass(frozen=True)
@@ -83,16 +85,30 @@ def build_metrics_jql(team: Team, lookback_days: int) -> str:
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 
 
-def fetch_team_issues(
+def build_release_metrics_jql(team: Team, releases: Sequence[str]) -> str:
+    """Scope a squad to every issue in the selected releases."""
+    clauses = build_team_scope_clauses(team)
+    if not clauses:
+        raise EODReportError(
+            f"{team.name} needs projects, filters, or a Team-field mapping"
+        )
+    release_clauses = [
+        f'(fixVersion = "{_jql_quote(release)}" '
+        f'OR labels = "{_jql_quote(release)}")'
+        for release in releases
+    ]
+    clauses.append("(" + " OR ".join(release_clauses) + ")")
+    return " AND ".join(clauses) + " ORDER BY updated DESC"
+
+
+def _search_issues(
     team: Team,
     config: Config,
     settings: ReportSettings,
     session: requests.Session,
+    jql: str,
 ) -> list[dict[str, Any]]:
-    """Fetch squad issues with their status changelog expanded inline.
-
-    Expanding the changelog during search avoids one extra request per issue.
-    """
+    """Run one paginated Jira issue search with changelogs expanded."""
     fields = BASE_FIELDS
     if settings.delivery_metrics.sprint_field:
         fields = f"{fields},{settings.delivery_metrics.sprint_field}"
@@ -101,7 +117,7 @@ def fetch_team_issues(
     next_page_token: str | None = None
     while True:
         params: dict[str, Any] = {
-            "jql": build_metrics_jql(team, settings.delivery_metrics.lookback_days),
+            "jql": jql,
             "fields": fields,
             "expand": "changelog",
             "maxResults": CHANGELOG_PAGE_SIZE,
@@ -128,10 +144,140 @@ def fetch_team_issues(
             raise EODReportError(
                 f"Jira returned invalid delivery metrics for {team.name}"
             )
-        issues.extend(issue for issue in page if isinstance(issue, dict))
+        issues.extend(
+            _complete_changelog(issue, team, config, session)
+            for issue in page
+            if isinstance(issue, dict)
+        )
         next_page_token = data.get("nextPageToken")
         if not next_page_token:
             return issues
+
+
+def _complete_changelog(
+    issue: Mapping[str, Any],
+    team: Team,
+    config: Config,
+    session: requests.Session,
+) -> dict[str, Any]:
+    """Fetch all changelog pages when Jira search returned a partial expansion."""
+    result = dict(issue)
+    changelog = issue.get("changelog")
+    if not isinstance(changelog, dict):
+        return result
+    histories = changelog.get("histories")
+    total = changelog.get("total")
+    if (
+        not isinstance(histories, list)
+        or not isinstance(total, int)
+        or total <= len(histories)
+    ):
+        return result
+
+    key = str(issue.get("key") or "").strip()
+    if not key:
+        raise EODReportError(
+            f"Jira returned a truncated changelog without an issue key for {team.name}"
+        )
+    complete: list[dict[str, Any]] = []
+    start_at = 0
+    while start_at < total:
+        try:
+            response = session.get(
+                f"{config.jira_base_url}/rest/api/3/issue/"
+                f"{quote(key, safe='-')}/changelog",
+                headers={"Accept": "application/json"},
+                auth=(config.jira_email, config.jira_api_token),
+                params={"startAt": start_at, "maxResults": CHANGELOG_PAGE_SIZE},
+                timeout=30,
+            )
+            response.raise_for_status()
+            data = response.json()
+        except (requests.RequestException, ValueError) as exc:
+            raise EODReportError(
+                f"Failed to fetch {team.name} delivery metrics changelog: "
+                f"{request_error_summary(exc)}"
+            ) from exc
+        values = data.get("values", [])
+        if not isinstance(values, list):
+            raise EODReportError(
+                f"Jira returned an invalid changelog for {team.name}"
+            )
+        page = [value for value in values if isinstance(value, dict)]
+        if not page:
+            raise EODReportError(
+                f"Jira returned an incomplete changelog for {team.name}"
+            )
+        complete.extend(page)
+        start_at += len(page)
+        page_total = data.get("total")
+        if isinstance(page_total, int):
+            total = page_total
+
+    result["changelog"] = {**changelog, "histories": complete, "total": total}
+    return result
+
+
+def _raw_fix_versions(issue: Mapping[str, Any]) -> tuple[str, ...]:
+    fields = issue.get("fields")
+    if not isinstance(fields, dict):
+        return ()
+    return _fix_versions(fields)
+
+
+def fetch_team_issues(
+    team: Team,
+    config: Config,
+    settings: ReportSettings,
+    session: requests.Session,
+) -> list[dict[str, Any]]:
+    """Fetch recent work, then complete every release shown by the dashboard.
+
+    The lookback query discovers currently relevant releases. A second query
+    retrieves all issues in those releases, so release metrics are never cut
+    off merely because an issue finished before the lookback boundary.
+    """
+    recent = _search_issues(
+        team,
+        config,
+        settings,
+        session,
+        build_metrics_jql(team, settings.delivery_metrics.lookback_days),
+    )
+    release_names = {
+        name.strip().casefold(): name.strip()
+        for issue in recent
+        for name in _raw_fix_versions(issue)
+        if name.strip()
+    }
+    configured = settings.release_blockers.label
+    if configured and configured.strip():
+        release_names.setdefault(configured.strip().casefold(), configured.strip())
+    selected = [
+        release_names[key]
+        for key in sorted(release_names, reverse=True)[:MAX_RELEASES]
+    ]
+
+    combined: dict[str, dict[str, Any]] = {}
+    for issue in recent:
+        marked = dict(issue)
+        marked["_delivery_in_lookback"] = True
+        combined[str(issue.get("key") or id(issue))] = marked
+    if selected:
+        complete = _search_issues(
+            team,
+            config,
+            settings,
+            session,
+            build_release_metrics_jql(team, selected),
+        )
+        for issue in complete:
+            key = str(issue.get("key") or id(issue))
+            if key not in combined:
+                marked = dict(issue)
+                marked["_delivery_in_lookback"] = False
+                combined[key] = marked
+    return list(combined.values())
 
 
 def _histories(issue: Mapping[str, Any]) -> list[Mapping[str, Any]]:
@@ -226,13 +372,18 @@ def issue_metric(
             lead_time(created, intervals, settings.done_statuses)
         ),
         flow_efficiency=flow_efficiency(
-            intervals, _waiting_statuses(settings), settings.done_statuses, now
+            intervals,
+            _waiting_statuses(settings),
+            settings.done_statuses,
+            now,
+            started_statuses,
         ),
         carry_over_sprints=carry_over_count(
             fields, settings.done_statuses, status
         ),
         fix_versions=_fix_versions(fields),
         labels=_labels(fields),
+        in_lookback=bool(issue.get("_delivery_in_lookback", True)),
     )
 
 def _started_statuses(
@@ -307,7 +458,9 @@ def release_options(
         for issue in snapshot.issues:
             for name in issue.fix_versions:
                 seen.setdefault(name.strip().casefold(), name.strip())
-    return tuple(seen[key] for key in sorted(seen, reverse=True))
+    return tuple(
+        seen[key] for key in sorted(seen, reverse=True)[:MAX_RELEASES]
+    )
 
 
 def summarize(
@@ -319,7 +472,12 @@ def summarize(
 
     When a release is given, only issues tagged with that release count.
     """
-    scoped = [issue for issue in snapshot.issues if in_release(issue, release)]
+    scoped = [
+        issue
+        for issue in snapshot.issues
+        if in_release(issue, release)
+        and (release is not None or issue.in_lookback)
+    ]
     completed = [issue for issue in scoped if issue.is_done]
     active = [issue for issue in scoped if not issue.is_done]
     cycle_times = [

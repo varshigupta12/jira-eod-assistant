@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 2
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, SCHEMA_VERSION})
+SCHEMA_VERSION = 3
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, SCHEMA_VERSION})
 DEFAULT_SNAPSHOT_DIR = "metrics"
 _SAFE_SEGMENT = re.compile(r"[^a-z0-9_-]+")
 
@@ -44,6 +44,7 @@ class IssueMetric:
     carry_over_sprints: int = 0
     fix_versions: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
+    in_lookback: bool = True
 
 
 @dataclass(frozen=True)
@@ -124,8 +125,11 @@ def _issue_from_payload(payload: Mapping[str, Any]) -> IssueMetric:
         lead_time_days=known.get("lead_time_days"),
         flow_efficiency=known.get("flow_efficiency"),
         carry_over_sprints=int(known.get("carry_over_sprints") or 0),
-        fix_versions=_names(known.get("fix_versions")),
+        fix_versions=_names(
+            known.get("fix_versions") or payload.get("releases")
+        ),
         labels=_names(known.get("labels")),
+        in_lookback=bool(known.get("in_lookback", True)),
     )
 
 

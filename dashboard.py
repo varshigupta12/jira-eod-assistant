@@ -21,6 +21,7 @@ from urllib.parse import quote
 import requests
 
 from delivery_metrics import (
+    MAX_RELEASES,
     TeamMetrics,
     collect_team_snapshot,
     release_options,
@@ -50,9 +51,6 @@ FLOW_HELP = (
     "Of the total elapsed time on a ticket, the share spent actively worked "
     "rather than waiting in blocked, review or deploy queues."
 )
-MAX_RELEASE_TABS = 6
-
-
 @dataclass(frozen=True)
 class TrendPoint:
     captured_date: str
@@ -321,7 +319,7 @@ def _tabs(
     bodies = []
     for index, view in enumerate(views):
         checked = " checked" if index == 0 else ""
-        name = view.release or "All releases"
+        name = view.release or "Recent work"
         inputs.append(
             f'<input type="radio" name="release" id="rel-{index}"{checked}>'
         )
@@ -438,7 +436,15 @@ def render_dashboard(
         body = _view_body(views[0], trends, jira_base_url)
         rules = ""
     release = views[0].release if not tabbed else None
-    scope = f" · release {_escape(release)}" if release else ""
+    if tabbed:
+        scope = (
+            f" · release tabs include all matching issues"
+            f" · Recent work uses {_escape(lookback)} days"
+        )
+    elif release:
+        scope = f" · all issues in release {_escape(release)}"
+    else:
+        scope = f" · {_escape(lookback)}-day recent-work window"
     return (
         "<!doctype html>\n"
         '<html lang="en"><head><meta charset="utf-8">'
@@ -447,7 +453,7 @@ def render_dashboard(
         f"<style>{STYLE}{rules}</style></head><body><div class=\"wrap\">"
         "<h1>Delivery metrics</h1>"
         f'<p class="meta">Generated {_escape(moment.strftime("%Y-%m-%d %H:%M UTC"))} '
-        f"· {_escape(lookback)}-day window{scope} · "
+        f"{scope} · "
         "metrics Jira Cloud cannot produce natively</p>"
         f"{body}"
         "</div></body></html>\n"
@@ -516,7 +522,7 @@ def build_dashboard(
 
     if all_releases:
         scopes: list[str | None] = list(
-            release_options(ordered, release)[:MAX_RELEASE_TABS]
+            release_options(ordered, release)[:MAX_RELEASES]
         )
         scopes.append(None)
     else:

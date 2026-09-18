@@ -242,16 +242,23 @@ def flow_efficiency(
     waiting_statuses: Iterable[str],
     done_statuses: Iterable[str],
     now: datetime | None = None,
+    started_statuses: Iterable[str] | None = None,
 ) -> float | None:
     """Share of elapsed working time that was active rather than waiting.
 
     Time after the issue reached a done status is excluded, so finished work is
     not credited with idle time it spent sitting in Done.
     """
+    started = tuple(started_statuses or ())
     considered = []
+    has_started = not started
     for interval in intervals:
         if _matches(interval.status, done_statuses):
             break
+        if not has_started:
+            if not _matches(interval.status, started):
+                continue
+            has_started = True
         considered.append(interval)
     if not considered:
         return None

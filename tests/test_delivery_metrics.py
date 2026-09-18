@@ -90,7 +90,17 @@ def transition(moment, previous, following):
     }
 
 
-def issue(key, status, created=None, histories=(), assignee="Ada", sprints=None):
+def issue(
+    key,
+    status,
+    created=None,
+    histories=(),
+    assignee="Ada",
+    sprints=None,
+    versions=None,
+    labels=None,
+    changelog_total=None,
+):
     fields = {
         "summary": f"Summary for {key}",
         "status": {"name": status},
@@ -99,10 +109,17 @@ def issue(key, status, created=None, histories=(), assignee="Ada", sprints=None)
     }
     if sprints is not None:
         fields["customfield_10020"] = [{"name": name} for name in sprints]
+    if versions is not None:
+        fields["fixVersions"] = [{"name": name} for name in versions]
+    if labels is not None:
+        fields["labels"] = list(labels)
+    changelog = {"histories": list(histories)}
+    if changelog_total is not None:
+        changelog["total"] = changelog_total
     return {
         "key": key,
         "fields": fields,
-        "changelog": {"histories": list(histories)},
+        "changelog": changelog,
     }
 
 
@@ -131,6 +148,15 @@ class JqlTests(unittest.TestCase):
         jql = build_metrics_jql(team(projects=('EN"G',)), 30)
 
         self.assertIn('EN\\"G', jql)
+
+    def test_release_query_has_no_date_boundary(self):
+        from delivery_metrics import build_release_metrics_jql
+
+        jql = build_release_metrics_jql(team(), ("2026.1",))
+
+        self.assertIn('fixVersion = "2026.1"', jql)
+        self.assertIn('labels = "2026.1"', jql)
+        self.assertNotIn("resolved", jql)
 
 
 class FetchTests(unittest.TestCase):
@@ -193,6 +219,65 @@ class FetchTests(unittest.TestCase):
             fetch_team_issues(team(), self._config(), settings(), session)
 
         self.assertNotIn("atlassian.net", str(error.exception))
+
+    def test_fetches_all_issues_for_each_discovered_release(self):
+        recent = Mock()
+        recent.raise_for_status.return_value = None
+        recent.json.return_value = {
+            "issues": [issue("ENG-2", "Done", versions=("2026.1",))]
+        }
+        release = Mock()
+        release.raise_for_status.return_value = None
+        release.json.return_value = {
+            "issues": [
+                issue("ENG-1", "Done", versions=("2026.1",)),
+                issue("ENG-2", "Done", versions=("2026.1",)),
+            ]
+        }
+        session = Mock()
+        session.get.side_effect = [recent, release]
+
+        issues = fetch_team_issues(team(), self._config(), settings(), session)
+
+        self.assertEqual({item["key"] for item in issues}, {"ENG-1", "ENG-2"})
+        by_key = {item["key"]: item for item in issues}
+        self.assertFalse(by_key["ENG-1"]["_delivery_in_lookback"])
+        self.assertTrue(by_key["ENG-2"]["_delivery_in_lookback"])
+        release_jql = session.get.call_args_list[1].kwargs["params"]["jql"]
+        self.assertNotIn("resolved", release_jql)
+
+    def test_fetches_every_page_of_a_truncated_changelog(self):
+        expanded = Mock()
+        expanded.raise_for_status.return_value = None
+        expanded.json.return_value = {
+            "issues": [
+                issue(
+                    "ENG-1",
+                    "Done",
+                    histories=(transition(at(2), "To Do", "In Progress"),),
+                    changelog_total=2,
+                )
+            ]
+        }
+        changelog = Mock()
+        changelog.raise_for_status.return_value = None
+        changelog.json.return_value = {
+            "values": [
+                transition(at(2), "To Do", "In Progress"),
+                transition(at(6), "In Progress", "Done"),
+            ],
+            "total": 2,
+        }
+        session = Mock()
+        session.get.side_effect = [expanded, changelog]
+
+        issues = fetch_team_issues(team(), self._config(), settings(), session)
+
+        self.assertEqual(len(issues[0]["changelog"]["histories"]), 2)
+        self.assertIn(
+            "/issue/ENG-1/changelog",
+            session.get.call_args_list[1].args[0],
+        )
 
 
 class IssueMetricTests(unittest.TestCase):

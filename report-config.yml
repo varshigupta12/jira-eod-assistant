@@ -49,6 +49,15 @@ release_blockers:
   enabled: true
   label: "2026.1"
 
+delivery_metrics:
+  enabled: true
+  lookback_days: 30
+  aging_wip_days: 5
+  snapshot_dir: metrics
+  dashboard_path: delivery-dashboard.html
+  # Replace with your Jira site's Sprint custom field to enable carry-over.
+  sprint_field: customfield_10020
+
 blocked_statuses: [Blocked, Impediment]
 deploy_statuses: [To Be Deployed, Ready for Deployment, Ready to Deploy]
 done_statuses: [Done, Closed, Resolved]

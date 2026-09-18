@@ -5,7 +5,8 @@ work from any number of Jira teams, creates concise updates, and posts:
 
 - daily EOD reports grouped by Epic, status, or assignee;
 - sprint-end highlights grouped by region and Epic in Format C;
-- current-release blockers grouped by team and ordered by blocked duration.
+- current-release blockers grouped by team and ordered by blocked duration;
+- a private, static cross-squad delivery dashboard with release filters.
 
 No Jira administrator access or hosted infrastructure is required. For live
 use, deploy from a private fork because Actions logs can reveal operational
@@ -23,6 +24,8 @@ metadata when external API requests fail.
 - Optional OpenRouter summaries grounded in Jira descriptions and comments
 - Configurable sprint-report title, cadence, timezone, and status names
 - Release matching through either Jira labels or Fix Version/s
+- Changelog-derived delivery metrics Jira cannot calculate natively
+- JavaScript-free HTML dashboard with Jira links and release tabs
 - Manual GitHub Actions runs for safe setup testing
 
 ## How it works
@@ -36,12 +39,17 @@ GitHub Actions
     |      +-- optional OpenRouter summary
     |      `-- Mattermost EOD post
     |
-    `-- sprint-runner check
+    +-- sprint-runner check
            +-- teams and boards from report-config.yml
            +-- active/recent sprint issues
            +-- AI-selected done/blocked/carryover highlights
            +-- combined Mattermost sprint post
            `-- optional current-release blocker post
+    |
+    `-- delivery-dashboard run
+           +-- changelog-derived squad metrics
+           +-- retained trend snapshots
+           `-- private HTML artifact
 ```
 
 The public source workflows are manual-only by default. Configure scheduling in
@@ -89,6 +97,8 @@ In **Actions**:
 - Run **Sprint Highlights Report** with `full` to post the sprint report followed
   by current-release blockers, or use `blocked-only` to post only the blocker
   report.
+- In a private fork, run **Delivery Metrics Dashboard**, download the
+  `delivery-dashboard` artifact, and open `delivery-dashboard.html`.
 
 Add scheduling only in the private deployment repository after testing.
 
@@ -118,6 +128,9 @@ pulse:
   enabled: false
 
 release_blockers:
+  enabled: false
+
+delivery_metrics:
   enabled: false
 ```
 
@@ -165,6 +178,14 @@ pulse:
 release_blockers:
   enabled: true
   label: "2026.1"
+
+delivery_metrics:
+  enabled: true
+  lookback_days: 30
+  aging_wip_days: 5
+  snapshot_dir: metrics
+  dashboard_path: delivery-dashboard.html
+  sprint_field: customfield_10020
 
 blocked_statuses: [Blocked, Impediment, On Hold]
 deploy_statuses: [Ready for Deployment, To Be Deployed]
@@ -265,6 +286,57 @@ Update `release_blockers.label` at each release rollover. The public workflow is
 manual-only; a private deployment can schedule `full` mode to post this report
 immediately after each sprint pulse.
 
+### Delivery metrics dashboard
+
+The dashboard complements Jira's native burndown, velocity, and control charts
+with metrics Jira Cloud does not provide:
+
+| Metric | Meaning |
+| --- | --- |
+| Blocked duration | Continuous time each currently blocked ticket has been blocked, longest first |
+| Median delivery time | Half of completed tickets moved from first active status to done within this time |
+| 85th percentile delivery time | 85% of completed tickets moved from first active status to done within this time |
+| Throughput | Completed tickets in the selected release, or in the lookback window for Recent work |
+| Aging work in progress | In-flight tickets sitting in one non-blocked status beyond the configured threshold |
+| Chronic carry-over | In-flight tickets present in at least two sprints |
+| Flow efficiency | Percentage of elapsed delivery time spent in active work rather than blocked, review, or deployment queues |
+
+Each squad is shown side by side and then expanded into aging, blocked, and
+carry-over ticket lists. Ticket keys link to Jira. Up to six release tabs are discovered from recent **Fix Version/s**, plus the
+configured `release_blockers.label`; issues match a tab through either Fix
+Version/s or label. Once discovered, each release is queried separately with
+no date boundary, so every matching issue is counted. A **Recent work** tab
+uses `lookback_days` for a release-independent operational view.
+
+```yaml
+delivery_metrics:
+  enabled: true
+  lookback_days: 30
+  aging_wip_days: 5
+  snapshot_dir: metrics
+  dashboard_path: delivery-dashboard.html
+  sprint_field: customfield_10020
+```
+
+Set `sprint_field` to the Sprint custom-field ID for your Jira site. Omit it if
+you do not need carry-over; that metric will remain zero. Find the ID through
+Jira's fields API or your browser's issue API response.
+
+The collector requests Jira search results with `expand=changelog` to avoid one
+API call per issue. Jira may truncate very large issue histories, so metrics for
+issues with exceptionally long changelogs can be incomplete.
+
+The generated file contains no JavaScript, external assets, or CDN calls.
+Ticket text is HTML-escaped. Release switching uses pre-rendered HTML and CSS,
+so the file works offline.
+
+The included workflow runs only when the repository is private. It restores the
+previous successful artifact's snapshots, retains 90 days of trend history, and
+uploads the HTML and snapshots as a private Actions artifact. Do not publish
+this dashboard with ordinary GitHub Pages: a Pages site backed by a private
+repository is still public unless the organization uses GitHub Enterprise
+Cloud Pages access control.
+
 ## Run locally
 
 Python 3.11 or newer is recommended.
@@ -311,6 +383,30 @@ Run only the current-release blocker report:
 PULSE_FORCE_RUN=true PULSE_REPORT_MODE=blocked-only python pulse_report.py
 ```
 
+Collect Jira metrics and write snapshots:
+
+```bash
+python delivery_metrics.py
+```
+
+Generate the dashboard with release tabs:
+
+```bash
+python dashboard.py --all-releases
+```
+
+Render from existing snapshots without querying Jira:
+
+```bash
+python dashboard.py --offline --all-releases
+```
+
+Render only one release:
+
+```bash
+python dashboard.py --release 2026.1
+```
+
 Use another configuration file with `REPORT_CONFIG=/path/to/config.yml`.
 
 ## Permissions
@@ -335,6 +431,8 @@ The reporter does not modify Jira data.
 - Review your organization's data-handling requirements before enabling AI.
 - GitHub Actions secrets are masked and are not passed to pull requests from
   forks.
+- Dashboard HTML and snapshot JSON contain Jira keys, summaries, assignees, and
+  derived delivery data. Keep the repository and downloaded artifact private.
 
 ## Troubleshooting
 
