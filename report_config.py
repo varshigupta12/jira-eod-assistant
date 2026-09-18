@@ -35,6 +35,7 @@ class Team:
     team_value: str | None
     daily_schedule: DailySchedule | None
     include_in_pulse: bool
+    release_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -296,6 +297,9 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
             )
         projects = _strings(item.get("projects"), f"{path_prefix}.projects")
         filters = _strings(item.get("filters"), f"{path_prefix}.filters")
+        release_labels = _strings(
+            item.get("release_labels"), f"{path_prefix}.release_labels"
+        )
         if daily_schedule:
             if daily_schedule.report_format == "epic" and not board_values:
                 raise ReportConfigError(
@@ -319,6 +323,7 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                 team_value=team_value,
                 daily_schedule=daily_schedule,
                 include_in_pulse=include_in_pulse,
+                release_labels=release_labels,
             )
         )
 

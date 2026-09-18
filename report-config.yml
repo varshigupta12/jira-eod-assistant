@@ -5,6 +5,7 @@ teams:
     name: Platform
     projects: [PLAT]
     filters: ["Platform delivery board"]
+    release_labels: [platform-team]
     boards: [101]
     daily:
       format: epic
@@ -15,6 +16,7 @@ teams:
     name: Services
     projects: [SVC]
     filters: ["Services sprint board"]
+    release_labels: [services-team]
     boards: [202]
     daily:
       format: status
@@ -25,6 +27,7 @@ teams:
     name: Mobile
     projects: [APP]
     filters: ["Mobile delivery board"]
+    release_labels: [mobile-team]
     boards: [303]
     daily:
       format: assignee

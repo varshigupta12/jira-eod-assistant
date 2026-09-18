@@ -167,6 +167,22 @@ class JqlTests(unittest.TestCase):
         self.assertIn('labels = "2026.1"', jql)
         self.assertNotIn("resolved", jql)
 
+    def test_release_labels_replace_current_board_filter_for_historical_work(self):
+        from delivery_metrics import build_release_metrics_jql
+
+        jql = build_release_metrics_jql(
+            team(
+                filters=("Current APAC board",),
+                release_labels=("pfe-apac",),
+            ),
+            ("26.04",),
+        )
+
+        self.assertIn('project = "ENG"', jql)
+        self.assertIn('labels = "pfe-apac"', jql)
+        self.assertIn('fixVersion = "26.04"', jql)
+        self.assertNotIn("Current APAC board", jql)
+
 
 class FetchTests(unittest.TestCase):
     def setUp(self):

@@ -87,7 +87,19 @@ def build_metrics_jql(team: Team, lookback_days: int) -> str:
 
 def build_release_metrics_jql(team: Team, releases: Sequence[str]) -> str:
     """Scope a squad to every issue in the selected releases."""
-    clauses = build_team_scope_clauses(team)
+    if team.release_labels:
+        clauses = []
+        if team.projects:
+            projects = " OR ".join(
+                f'project = "{_jql_quote(project)}"' for project in team.projects
+            )
+            clauses.append(f"({projects})")
+        team_labels = " OR ".join(
+            f'labels = "{_jql_quote(label)}"' for label in team.release_labels
+        )
+        clauses.append(f"({team_labels})")
+    else:
+        clauses = build_team_scope_clauses(team)
     if not clauses:
         raise EODReportError(
             f"{team.name} needs projects, filters, or a Team-field mapping"
