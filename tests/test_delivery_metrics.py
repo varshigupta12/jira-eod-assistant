@@ -183,6 +183,21 @@ class JqlTests(unittest.TestCase):
         self.assertIn('fixVersion = "26.04"', jql)
         self.assertNotIn("Current APAC board", jql)
 
+    def test_current_release_can_keep_the_current_board_filter(self):
+        from delivery_metrics import build_release_metrics_jql
+
+        jql = build_release_metrics_jql(
+            team(
+                filters=("Current APAC board",),
+                release_labels=("pfe-apac",),
+            ),
+            ("26.10",),
+            use_release_labels=False,
+        )
+
+        self.assertIn('filter = "Current APAC board"', jql)
+        self.assertNotIn('labels = "pfe-apac"', jql)
+
 
 class FetchTests(unittest.TestCase):
     def setUp(self):

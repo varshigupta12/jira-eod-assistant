@@ -85,9 +85,13 @@ def build_metrics_jql(team: Team, lookback_days: int) -> str:
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 
 
-def build_release_metrics_jql(team: Team, releases: Sequence[str]) -> str:
+def build_release_metrics_jql(
+    team: Team,
+    releases: Sequence[str],
+    use_release_labels: bool = True,
+) -> str:
     """Scope a squad to every issue in the selected releases."""
-    if team.release_labels:
+    if use_release_labels and team.release_labels:
         clauses = []
         if team.projects:
             projects = " OR ".join(
@@ -278,13 +282,42 @@ def fetch_team_issues(
         marked["_delivery_in_lookback"] = True
         combined[str(issue.get("key") or id(issue))] = marked
     if selected:
-        complete = _search_issues(
-            team,
-            config,
-            settings,
-            session,
-            build_release_metrics_jql(team, selected),
+        current_release = (
+            configured.strip().casefold() if configured and configured.strip() else None
         )
+        current = [
+            release
+            for release in selected
+            if release.strip().casefold() == current_release
+        ]
+        historical = [
+            release
+            for release in selected
+            if release.strip().casefold() != current_release
+        ]
+        complete: list[dict[str, Any]] = []
+        if current:
+            complete.extend(
+                _search_issues(
+                    team,
+                    config,
+                    settings,
+                    session,
+                    build_release_metrics_jql(
+                        team, current, use_release_labels=False
+                    ),
+                )
+            )
+        if historical:
+            complete.extend(
+                _search_issues(
+                    team,
+                    config,
+                    settings,
+                    session,
+                    build_release_metrics_jql(team, historical),
+                )
+            )
         for issue in complete:
             key = str(issue.get("key") or id(issue))
             if key not in combined:

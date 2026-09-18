@@ -322,6 +322,9 @@ teams:
     release_labels: [platform-team]
 ```
 
+The configured current release continues to use the current board filters;
+`release_labels` apply only to historical releases.
+
 ```yaml
 delivery_metrics:
   enabled: true
