@@ -23,6 +23,8 @@ import requests
 from delivery_metrics import (
     MAX_RELEASES,
     TeamMetrics,
+    build_metrics_jql,
+    build_release_metrics_jql,
     collect_all,
     release_options,
     summarize,
@@ -145,7 +147,34 @@ def _bar(value: float | None, highest: float, tone: str) -> str:
     )
 
 
-def _comparison_table(summaries: Sequence[TeamMetrics]) -> str:
+def _total_cell(
+    summary: TeamMetrics,
+    settings: ReportSettings,
+    jira_base_url: str | None,
+) -> str:
+    """Link the exact dashboard scope to Jira's Issue Navigator."""
+    if not jira_base_url:
+        return f'<td class="total">{summary.total}</td>'
+    team = settings.team(summary.team_id)
+    jql = (
+        build_release_metrics_jql(team, (summary.release,))
+        if summary.release
+        else build_metrics_jql(team, settings.delivery_metrics.lookback_days)
+    )
+    url = f"{jira_base_url.rstrip('/')}/issues/?jql={quote(jql, safe='')}"
+    return (
+        f'<td class="total"><a href="{_escape(url)}" '
+        f'rel="noopener noreferrer" target="_blank" '
+        f'title="Open all {summary.total} tickets in Jira">'
+        f"{summary.total}</a></td>"
+    )
+
+
+def _comparison_table(
+    summaries: Sequence[TeamMetrics],
+    settings: ReportSettings,
+    jira_base_url: str | None,
+) -> str:
     """The cross-squad view that Jira gadgets cannot produce."""
     rows = []
     slowest = max(
@@ -156,7 +185,7 @@ def _comparison_table(summaries: Sequence[TeamMetrics]) -> str:
         rows.append(
             "<tr>"
             f'<th scope="row">{_icon(summary.team_id)} {_escape(summary.team_name)}</th>'
-            f"<td>{summary.total}</td>"
+            f"{_total_cell(summary, settings, jira_base_url)}"
             f"<td>{summary.throughput}"
             f'<div class="track">{_bar(summary.throughput, busiest, "good")}</div></td>'
             f"<td>{summary.wip}</td>"
@@ -271,6 +300,7 @@ def _squad_section(
 def _view_body(
     view: ReleaseView,
     trends: dict[str, tuple[TrendPoint, ...]],
+    settings: ReportSettings,
     jira_base_url: str | None,
 ) -> str:
     """Squad summary plus per-squad detail for one release scope."""
@@ -282,7 +312,7 @@ def _view_body(
         return '<section><p class="empty">No squads configured.</p></section>'
     return (
         "<section><h2>Squad summary</h2>"
-        f"{_comparison_table(view.summaries)}"
+        f"{_comparison_table(view.summaries, settings, jira_base_url)}"
         '<p class="note">Delivery time runs from the first active status to a '
         "done status. Percentage actively worked excludes blocked, review and "
         "deploy queues. Hover a column heading for detail.</p></section>"
@@ -312,6 +342,7 @@ def _tab_rules(count: int) -> str:
 def _tabs(
     views: Sequence[ReleaseView],
     trends: dict[str, tuple[TrendPoint, ...]],
+    settings: ReportSettings,
     jira_base_url: str | None,
 ) -> str:
     """Render every release as a pre-built tab, switched with CSS alone."""
@@ -327,7 +358,7 @@ def _tabs(
         labels.append(f'<label for="rel-{index}">{_escape(name)}</label>')
         bodies.append(
             f'<div class="view" id="view-{index}">'
-            f"{_view_body(view, trends, jira_base_url)}</div>"
+            f"{_view_body(view, trends, settings, jira_base_url)}</div>"
         )
     return (
         '<div class="tabs">'
@@ -384,6 +415,7 @@ thead th abbr { text-decoration: underline dotted; cursor: help; }
   text-align: center; }
 .key a { color: inherit; text-decoration: none; border-bottom: 1px solid #c3cad4; }
 .key a:hover { border-bottom-color: currentColor; }
+.total a { color: inherit; font-weight: 650; text-decoration: underline; }
 .tabs > input { position: absolute; opacity: 0; width: 0; height: 0; }
 .tabs > .view { display: none; }
 .tabbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
@@ -431,10 +463,10 @@ def render_dashboard(
         views = (ReleaseView(None, ()),)
     tabbed = len(views) > 1
     if tabbed:
-        body = _tabs(views, trends, jira_base_url)
+        body = _tabs(views, trends, settings, jira_base_url)
         rules = _tab_rules(len(views))
     else:
-        body = _view_body(views[0], trends, jira_base_url)
+        body = _view_body(views[0], trends, settings, jira_base_url)
         rules = ""
     release = views[0].release if not tabbed else None
     if tabbed:

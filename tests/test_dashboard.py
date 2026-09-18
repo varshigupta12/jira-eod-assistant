@@ -341,3 +341,29 @@ class ReleaseFilterTests(unittest.TestCase):
             'href="https://example.atlassian.net/browse/EM-1"', markup
         )
         self.assertIn('rel="noopener noreferrer"', markup)
+
+    def test_total_ticket_count_links_to_exact_release_jql(self):
+        config = settings()
+        issues = (
+            metric(
+                "EM-1",
+                is_done=True,
+                fix_versions=("2026.09",),
+            ),
+        )
+        views = [
+            ReleaseView(
+                "2026.09",
+                (summarize(snapshot(issues=issues), config, "2026.09"),),
+            )
+        ]
+
+        markup = render_dashboard(
+            views, {}, config, NOW, "https://example.atlassian.net"
+        )
+
+        self.assertIn(
+            'href="https://example.atlassian.net/issues/?jql=', markup
+        )
+        self.assertIn("fixVersion%20%3D%20%222026.09%22", markup)
+        self.assertIn("Open all 1 tickets in Jira", markup)
