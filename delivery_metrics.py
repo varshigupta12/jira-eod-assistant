@@ -80,7 +80,7 @@ def build_metrics_jql(team: Team, lookback_days: int) -> str:
         )
     clauses.append(
         f"(resolved >= -{lookback_days}d OR "
-        '(resolved IS EMPTY AND statusCategory != "To Do"))'
+        'statusCategory = "In Progress")'
     )
     return " AND ".join(clauses) + " ORDER BY updated DESC"
 
@@ -230,6 +230,8 @@ def fetch_team_issues(
     config: Config,
     settings: ReportSettings,
     session: requests.Session,
+    releases: Sequence[str] | None = None,
+    recent_issues: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch recent work, then complete every release shown by the dashboard.
 
@@ -237,7 +239,7 @@ def fetch_team_issues(
     retrieves all issues in those releases, so release metrics are never cut
     off merely because an issue finished before the lookback boundary.
     """
-    recent = _search_issues(
+    recent = list(recent_issues) if recent_issues is not None else _search_issues(
         team,
         config,
         settings,
@@ -253,7 +255,7 @@ def fetch_team_issues(
     configured = settings.release_blockers.label
     if configured and configured.strip():
         release_names.setdefault(configured.strip().casefold(), configured.strip())
-    selected = [
+    selected = list(releases) if releases is not None else [
         release_names[key]
         for key in sorted(release_names, reverse=True)[:MAX_RELEASES]
     ]
@@ -341,6 +343,16 @@ def issue_metric(
         else "Unknown"
     )
     normalized = status.strip().casefold()
+    status_category = (
+        status_data.get("statusCategory")
+        if isinstance(status_data, dict)
+        else None
+    )
+    category_key = (
+        str(status_category.get("key") or "").strip().casefold()
+        if isinstance(status_category, dict)
+        else ""
+    )
     created = issue_created(fields)
     intervals = status_intervals(_histories(issue), created, status, now)
 
@@ -384,6 +396,12 @@ def issue_metric(
         fix_versions=_fix_versions(fields),
         labels=_labels(fields),
         in_lookback=bool(issue.get("_delivery_in_lookback", True)),
+        is_started=(
+            category_key == "indeterminate"
+            if category_key
+            else normalized not in {"to do", "open", "backlog"}
+            and not is_done
+        ),
     )
 
 def _started_statuses(
@@ -408,11 +426,20 @@ def collect_team_snapshot(
     settings: ReportSettings,
     session: requests.Session,
     now: datetime | None = None,
+    releases: Sequence[str] | None = None,
+    recent_issues: Sequence[Mapping[str, Any]] | None = None,
 ) -> TeamSnapshot:
     """Fetch a squad's issues and capture their metrics as a snapshot."""
     current_time = now or datetime.now(timezone.utc)
     config = _team_config(team, settings)
-    issues = fetch_team_issues(team, config, settings, session)
+    issues = fetch_team_issues(
+        team,
+        config,
+        settings,
+        session,
+        releases=releases,
+        recent_issues=recent_issues,
+    )
     measured = [
         metric
         for metric in (
@@ -479,7 +506,9 @@ def summarize(
         and (release is not None or issue.in_lookback)
     ]
     completed = [issue for issue in scoped if issue.is_done]
-    active = [issue for issue in scoped if not issue.is_done]
+    active = [
+        issue for issue in scoped if not issue.is_done and issue.is_started
+    ]
     cycle_times = [
         timedelta(days=issue.cycle_time_days)
         for issue in completed
@@ -542,15 +571,47 @@ def collect_all(
     settings: ReportSettings,
     session: requests.Session | None = None,
     now: datetime | None = None,
+    persist: bool = True,
 ) -> tuple[TeamSnapshot, ...]:
-    """Collect and persist a snapshot for every configured squad."""
+    """Collect every squad with the same complete set of release scopes."""
     if not settings.delivery_metrics.enabled:
         return ()
     client = session or requests.Session()
+    recent_by_team: dict[str, list[dict[str, Any]]] = {}
+    releases: dict[str, str] = {}
+    configured = settings.release_blockers.label
+    if configured and configured.strip():
+        releases[configured.strip().casefold()] = configured.strip()
+
+    for team in settings.teams:
+        config = _team_config(team, settings)
+        recent = _search_issues(
+            team,
+            config,
+            settings,
+            client,
+            build_metrics_jql(team, settings.delivery_metrics.lookback_days),
+        )
+        recent_by_team[team.id] = recent
+        for issue in recent:
+            for release in _raw_fix_versions(issue):
+                releases.setdefault(release.strip().casefold(), release.strip())
+
+    selected = [
+        releases[key] for key in sorted(releases, reverse=True)[:MAX_RELEASES]
+    ]
     snapshots = []
     for team in settings.teams:
-        snapshot = collect_team_snapshot(team, settings, client, now)
-        write_snapshot(settings.delivery_metrics.snapshot_dir, snapshot)
+        snapshot = collect_team_snapshot(
+            team,
+            settings,
+            client,
+            now,
+            releases=selected,
+            recent_issues=recent_by_team[team.id],
+        )
+        if persist:
+            write_snapshot(settings.delivery_metrics.snapshot_dir, snapshot)
         snapshots.append(snapshot)
     return tuple(snapshots)
 
@@ -572,12 +633,9 @@ def main() -> int:
         if not settings.delivery_metrics.enabled:
             print("Delivery metrics are disabled in the configuration.")
             return 0
-        session = requests.Session()
         now = datetime.now(timezone.utc)
-        for team in settings.teams:
-            snapshot = collect_team_snapshot(team, settings, session, now)
-            if not args.dry_run:
-                write_snapshot(settings.delivery_metrics.snapshot_dir, snapshot)
+        snapshots = collect_all(settings, now=now, persist=not args.dry_run)
+        for snapshot in snapshots:
             summary = summarize(snapshot, settings)
             print(
                 f"{summary.team_name}: throughput={summary.throughput} "

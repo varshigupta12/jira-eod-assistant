@@ -29,6 +29,7 @@ from report_config import (
     ReportSettings,
     Team,
 )
+from snapshot_store import TeamSnapshot
 from zoneinfo import ZoneInfo
 from datetime import date, time
 
@@ -100,10 +101,18 @@ def issue(
     versions=None,
     labels=None,
     changelog_total=None,
+    status_category=None,
 ):
     fields = {
         "summary": f"Summary for {key}",
-        "status": {"name": status},
+        "status": {
+            "name": status,
+            **(
+                {"statusCategory": {"key": status_category}}
+                if status_category
+                else {}
+            ),
+        },
         "assignee": {"displayName": assignee} if assignee else None,
         "created": (created or at(1)).isoformat(),
     }
@@ -129,7 +138,7 @@ class JqlTests(unittest.TestCase):
 
         self.assertIn('project = "ENG"', jql)
         self.assertIn("resolved >= -30d", jql)
-        self.assertIn("resolved IS EMPTY", jql)
+        self.assertIn('statusCategory = "In Progress"', jql)
 
     def test_saved_filter_takes_precedence_over_team_field(self):
         jql = build_metrics_jql(
@@ -279,6 +288,29 @@ class FetchTests(unittest.TestCase):
             session.get.call_args_list[1].args[0],
         )
 
+    def test_explicit_release_is_fetched_even_when_this_team_did_not_discover_it(self):
+        recent = Mock()
+        recent.raise_for_status.return_value = None
+        recent.json.return_value = {"issues": []}
+        release = Mock()
+        release.raise_for_status.return_value = None
+        release.json.return_value = {
+            "issues": [issue("ENG-1", "Done", versions=("2026.1",))]
+        }
+        session = Mock()
+        session.get.side_effect = [recent, release]
+
+        issues = fetch_team_issues(
+            team(),
+            self._config(),
+            settings(),
+            session,
+            releases=("2026.1",),
+        )
+
+        self.assertEqual([item["key"] for item in issues], ["ENG-1"])
+        self.assertFalse(issues[0]["_delivery_in_lookback"])
+
 
 class IssueMetricTests(unittest.TestCase):
     def test_measures_a_completed_issue(self):
@@ -418,6 +450,29 @@ class SummarizeTests(unittest.TestCase):
         self.assertEqual(summary.throughput, 0)
         self.assertIsNone(summary.cycle_time_median_days)
         self.assertIsNone(summary.flow_efficiency)
+
+    def test_release_backlog_is_not_counted_as_in_flight(self):
+        backlog = issue_metric(
+            issue(
+                "ENG-1",
+                "To Do",
+                versions=("2026.1",),
+                status_category="new",
+            ),
+            settings(),
+            NOW,
+        )
+        snapshot = TeamSnapshot(
+            team_id="emea",
+            team_name="EMEA",
+            captured_at=NOW.isoformat(),
+            issues=(backlog,),
+        )
+
+        summary = summarize(snapshot, settings(), release="2026.1")
+
+        self.assertEqual(summary.wip, 0)
+        self.assertEqual(summary.aging_wip, ())
 
 
 if __name__ == "__main__":

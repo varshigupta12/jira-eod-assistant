@@ -23,7 +23,7 @@ import requests
 from delivery_metrics import (
     MAX_RELEASES,
     TeamMetrics,
-    collect_team_snapshot,
+    collect_all,
     release_options,
     summarize,
 )
@@ -33,7 +33,6 @@ from snapshot_store import (
     SnapshotError,
     TeamSnapshot,
     load_snapshots,
-    write_snapshot,
 )
 
 SQUAD_ICONS = {"apac": "🌏", "emea": "🌍", "amer": "🌎"}
@@ -503,9 +502,7 @@ def build_dashboard(
     directory = settings.delivery_metrics.snapshot_dir
     if refresh:
         client = session or requests.Session()
-        for team in settings.teams:
-            snapshot = collect_team_snapshot(team, settings, client, moment)
-            write_snapshot(directory, snapshot)
+        collect_all(settings, client, moment)
 
     history = load_snapshots(directory)
     if not history:

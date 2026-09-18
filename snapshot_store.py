@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 3
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, SCHEMA_VERSION})
+SCHEMA_VERSION = 4
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, SCHEMA_VERSION})
 DEFAULT_SNAPSHOT_DIR = "metrics"
 _SAFE_SEGMENT = re.compile(r"[^a-z0-9_-]+")
 
@@ -45,6 +45,7 @@ class IssueMetric:
     fix_versions: tuple[str, ...] = ()
     labels: tuple[str, ...] = ()
     in_lookback: bool = True
+    is_started: bool = True
 
 
 @dataclass(frozen=True)
@@ -130,6 +131,13 @@ def _issue_from_payload(payload: Mapping[str, Any]) -> IssueMetric:
         ),
         labels=_names(known.get("labels")),
         in_lookback=bool(known.get("in_lookback", True)),
+        is_started=bool(
+            known.get(
+                "is_started",
+                str(known.get("status") or "").strip().casefold()
+                not in {"to do", "open", "backlog"},
+            )
+        ),
     )
 
 
