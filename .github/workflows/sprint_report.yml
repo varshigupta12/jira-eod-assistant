@@ -4,6 +4,15 @@ on:
   # Add schedule entries only in a private deployment fork. Action logs in a
   # public repository can expose operational metadata when a request fails.
   workflow_dispatch:
+    inputs:
+      report_mode:
+        description: Report(s) to post
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - blocked-only
 
 permissions:
   contents: read
@@ -33,5 +42,6 @@ jobs:
           MATTERMOST_WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PULSE_FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' }}
+          PULSE_REPORT_MODE: ${{ inputs.report_mode || 'full' }}
           GITHUB_EVENT_SCHEDULE: ${{ github.event.schedule }}
         run: python pulse_report.py

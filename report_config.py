@@ -56,10 +56,17 @@ class PulseSettings:
 
 
 @dataclass(frozen=True)
+class ReleaseBlockerSettings:
+    enabled: bool
+    label: str | None
+
+
+@dataclass(frozen=True)
 class ReportSettings:
     teams: tuple[Team, ...]
     ai: AISettings
     pulse: PulseSettings
+    release_blockers: ReleaseBlockerSettings
     blocked_statuses: frozenset[str]
     deploy_statuses: frozenset[str]
     done_statuses: frozenset[str]
@@ -345,11 +352,41 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
         cadence_days=cadence_days,
         anchor_date=anchor_date,
     )
+    release_blockers_raw = _mapping(
+        root.get("release_blockers", {}), "release_blockers"
+    )
+    release_blockers_enabled = release_blockers_raw.get("enabled", False)
+    if not isinstance(release_blockers_enabled, bool):
+        raise ReportConfigError("release_blockers.enabled must be true or false")
+    release_label = _string(
+        release_blockers_raw.get("label"),
+        "release_blockers.label",
+        required=False,
+    )
+    if release_blockers_enabled and not release_label:
+        raise ReportConfigError(
+            "release_blockers.label is required when release blockers are enabled"
+        )
+    if release_blockers_enabled:
+        for index, team in enumerate(teams):
+            if team.include_in_pulse and not (
+                team.projects
+                or team.filters
+                or (team.team_field and team.team_value)
+            ):
+                raise ReportConfigError(
+                    f"teams[{index}] needs projects, filters, or a Team-field "
+                    "mapping when release blockers are enabled"
+                )
 
     return ReportSettings(
         teams=tuple(teams),
         ai=ai,
         pulse=pulse,
+        release_blockers=ReleaseBlockerSettings(
+            enabled=release_blockers_enabled,
+            label=release_label,
+        ),
         blocked_statuses=_statuses(
             root, "blocked_statuses", ("blocked", "impediment")
         ),

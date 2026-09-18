@@ -50,6 +50,9 @@ pulse:
   time: "20:00"
   cadence_days: 14
   anchor_date: "2026-08-14"
+release_blockers:
+  enabled: true
+  label: "2026.1"
 """
 
 
@@ -70,6 +73,7 @@ class ConfigTests(unittest.TestCase):
             settings.team("core").daily_schedule.report_format, "status"
         )
         self.assertEqual(settings.pulse.title, "Engineering Pulse")
+        self.assertEqual(settings.release_blockers.label, "2026.1")
 
     def test_rejects_duplicate_team_ids(self):
         duplicate = CONFIG.replace(
@@ -78,6 +82,24 @@ class ConfigTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ReportConfigError, "Duplicate team ID"):
             self.load(duplicate)
+
+    def test_requires_release_label_when_enabled(self):
+        invalid = CONFIG.replace('  label: "2026.1"', '  label: ""')
+
+        with self.assertRaisesRegex(ReportConfigError, "release_blockers.label"):
+            self.load(invalid)
+
+    def test_release_blockers_require_a_team_query(self):
+        invalid = CONFIG.replace(
+            "    projects: [CORE, OPS]\n"
+            "    filters: [Core board, Operations board]\n",
+            "",
+        ).replace("      format: status", "      format: epic")
+
+        with self.assertRaisesRegex(
+            ReportConfigError, "when release blockers are enabled"
+        ):
+            self.load(invalid)
 
     def test_selects_due_teams_in_their_timezone(self):
         settings = self.load()

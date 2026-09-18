@@ -693,6 +693,144 @@ class OpenRouterTests(unittest.TestCase):
         self.assertEqual(updates, {})
         session.post.assert_not_called()
 
+    def test_can_enrich_blocked_ticket_with_only_old_comments(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "issues": [
+                                    {
+                                        "key": "APAC-1",
+                                        "update": "Work remains blocked.",
+                                        "blocker_reason": "Waiting for credentials.",
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+        session = Mock()
+        session.post.return_value = response
+        config = make_config(
+            AI_SUMMARIZE="true", OPENROUTER_API_KEY="sk-or-test"
+        )
+        blocked = make_issue(
+            "APAC-1",
+            "Blocked",
+            comments=[
+                {
+                    "created": "2020-01-01T00:00:00+00:00",
+                    "body": "Waiting for credentials",
+                },
+                {
+                    "created": "2020-01-02T00:00:00+00:00",
+                    "body": "Status checked",
+                },
+            ],
+        )
+        blocked["_eod_blocked_since"] = "2019-12-31T00:00:00+00:00"
+
+        updates = generate_ai_updates(
+            [blocked], config, session, include_all_blocked=True
+        )
+
+        self.assertEqual(
+            updates["APAC-1"].blocker_reason, "Waiting for credentials."
+        )
+        prompt = session.post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertIn("Waiting for credentials", prompt)
+        self.assertIn("blocked_period_comments", prompt)
+
+    def test_release_blocker_context_excludes_comments_before_blocked_period(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "issues": [
+                                    {
+                                        "key": "APAC-1",
+                                        "update": "Work remains blocked.",
+                                        "blocker_reason": "Waiting for access.",
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+        session = Mock()
+        session.post.return_value = response
+        config = make_config(
+            AI_SUMMARIZE="true", OPENROUTER_API_KEY="sk-or-test"
+        )
+        blocked = make_issue(
+            "APAC-1",
+            "Blocked",
+            comments=[
+                {
+                    "created": "2026-08-20T00:00:00+00:00",
+                    "body": "Old blocker was resolved",
+                },
+                {
+                    "created": "2026-08-25T00:00:00+00:00",
+                    "body": "Waiting for access",
+                },
+            ],
+        )
+        blocked["_eod_blocked_since"] = "2026-08-24T00:00:00+00:00"
+
+        generate_ai_updates([blocked], config, session, include_all_blocked=True)
+
+        prompt = session.post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertNotIn("Old blocker was resolved", prompt)
+        self.assertIn("Waiting for access", prompt)
+
+    def test_release_blocker_can_enrich_to_do_category(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "issues": [
+                                    {
+                                        "key": "APAC-1",
+                                        "update": "Work remains blocked.",
+                                        "blocker_reason": "",
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+        session = Mock()
+        session.post.return_value = response
+        config = make_config(
+            AI_SUMMARIZE="true", OPENROUTER_API_KEY="sk-or-test"
+        )
+        blocked = make_issue("APAC-1", "Blocked", category="new")
+
+        updates = generate_ai_updates(
+            [blocked], config, session, include_all_blocked=True
+        )
+
+        self.assertIn("APAC-1", updates)
+
     def test_rejects_missing_issue_results(self):
         response = Mock()
         response.raise_for_status.return_value = None
@@ -708,7 +846,7 @@ class OpenRouterTests(unittest.TestCase):
         with self.assertRaisesRegex(EODReportError, "every requested issue"):
             generate_ai_updates([make_issue("APAC-1", "Blocked")], config, session)
 
-    def test_surfaces_openrouter_error_message(self):
+    def test_sanitizes_openrouter_error_message(self):
         response = Mock()
         response.status_code = 404
         response.json.return_value = {
@@ -722,10 +860,9 @@ class OpenRouterTests(unittest.TestCase):
             AI_SUMMARIZE="true", OPENROUTER_API_KEY="sk-or-test"
         )
 
-        with self.assertRaisesRegex(
-            EODReportError, "No endpoints found for the selected model"
-        ):
+        with self.assertRaisesRegex(EODReportError, "HTTP 404") as error:
             generate_ai_updates([make_issue("APAC-1", "Blocked")], config, session)
+        self.assertNotIn("No endpoints found", str(error.exception))
 
     def test_reports_truncated_response(self):
         response = Mock()

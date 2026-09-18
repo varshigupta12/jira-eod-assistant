@@ -45,6 +45,10 @@ pulse:
   cadence_days: 14
   anchor_date: "2026-01-09"
 
+release_blockers:
+  enabled: true
+  label: "2026.1"
+
 blocked_statuses: [Blocked, Impediment]
 deploy_statuses: [To Be Deployed, Ready for Deployment, Ready to Deploy]
 done_statuses: [Done, Closed, Resolved]
