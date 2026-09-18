@@ -13,6 +13,15 @@ from urllib.parse import quote
 
 import requests
 
+from metrics import (
+    continuous_entry,
+    format_duration,
+    issue_created,
+    parse_jira_datetime,
+    status_intervals,
+    status_transitions,
+)
+
 DEFAULT_DONE_STATUSES = ("done", "closed", "resolved")
 DEFAULT_BLOCKED_STATUSES = ("blocked", "impediment")
 DEFAULT_DEPLOY_STATUSES = ("to be deployed", "ready for deployment", "ready to deploy")
@@ -195,6 +204,30 @@ def _jql_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def build_team_scope_clauses(team: Any) -> list[str]:
+    """Build the JQL clauses that scope a query to one squad.
+
+    Saved filters take precedence over a Team-field mapping, matching the
+    daily report's behaviour.
+    """
+    clauses = []
+    if team.projects:
+        projects = " OR ".join(
+            f'project = "{_jql_quote(project)}"' for project in team.projects
+        )
+        clauses.append(f"({projects})")
+    if team.filters:
+        filters = " OR ".join(
+            f'filter = "{_jql_quote(value)}"' for value in team.filters
+        )
+        clauses.append(f"({filters})")
+    elif team.team_field and team.team_value:
+        clauses.append(
+            f'"{_jql_quote(team.team_field)}" = "{_jql_quote(team.team_value)}"'
+        )
+    return clauses
+
+
 def build_jql(config: Config) -> str:
     clauses = []
     if config.jira_projects:
@@ -307,11 +340,7 @@ def comment_body_to_text(body: Any) -> str:
 
 
 def _parse_jira_datetime(value: str) -> datetime:
-    normalized = value.strip().replace("Z", "+00:00")
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return parse_jira_datetime(value)
 
 
 def get_recent_comment(
@@ -528,31 +557,7 @@ def _fetch_issue_changelog(
 def _status_transitions(
     histories: Sequence[Mapping[str, Any]],
 ) -> list[tuple[datetime, str, str]]:
-    transitions: list[tuple[datetime, str, str]] = []
-    for history in histories:
-        if not history.get("created"):
-            continue
-        try:
-            created = _parse_jira_datetime(str(history["created"]))
-        except ValueError:
-            continue
-        items = history.get("items", [])
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            field = str(item.get("fieldId") or item.get("field") or "").casefold()
-            if field != "status":
-                continue
-            transitions.append(
-                (
-                    created,
-                    str(item.get("fromString") or "Unknown"),
-                    str(item.get("toString") or "Unknown"),
-                )
-            )
-    return sorted(transitions)
+    return status_transitions(histories)
 
 
 def _recent_status_change(
@@ -586,40 +591,27 @@ def _current_blocked_duration(
     histories: Sequence[Mapping[str, Any]],
     blocked_statuses: frozenset[str],
     now: datetime | None = None,
+    created: datetime | None = None,
+    current_status: str = "",
 ) -> str | None:
-    blocked_since: datetime | None = None
-    for created, previous, current in _status_transitions(histories):
-        previous_is_blocked = previous.strip().casefold() in blocked_statuses
-        current_is_blocked = current.strip().casefold() in blocked_statuses
-        if current_is_blocked and not previous_is_blocked:
-            blocked_since = created
-        elif not current_is_blocked:
-            blocked_since = None
+    intervals = status_intervals(
+        histories,
+        created,
+        current_status or _last_transition_status(histories),
+        now,
+    )
+    blocked_since = continuous_entry(intervals, blocked_statuses)
     if blocked_since is None:
         return None
-
     current_time = now or datetime.now(timezone.utc)
     if current_time.tzinfo is None:
         current_time = current_time.replace(tzinfo=timezone.utc)
-    elapsed_seconds = max(
-        0,
-        int(
-            (
-                current_time.astimezone(timezone.utc)
-                - blocked_since.astimezone(timezone.utc)
-            ).total_seconds()
-        ),
-    )
-    days, remainder = divmod(elapsed_seconds, 24 * 60 * 60)
-    hours = remainder // (60 * 60)
-    if days == 0 and hours == 0:
-        return "<1 hour"
-    parts = []
-    if days:
-        parts.append(f"{days} {'day' if days == 1 else 'days'}")
-    if hours:
-        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
-    return " ".join(parts)
+    return format_duration(current_time.astimezone(timezone.utc) - blocked_since)
+
+
+def _last_transition_status(histories: Sequence[Mapping[str, Any]]) -> str:
+    transitions = status_transitions(histories)
+    return transitions[-1][2] if transitions else ""
 
 
 def filter_issues_with_recent_activity(
@@ -659,7 +651,15 @@ def filter_issues_with_recent_activity(
             active_issue["_eod_status_change"] = status_change
             if is_blocked and histories is not None:
                 active_issue["_eod_blocked_duration"] = _current_blocked_duration(
-                    histories, config.blocked_statuses, now
+                    histories,
+                    config.blocked_statuses,
+                    now,
+                    created=issue_created(fields),
+                    current_status=(
+                        str(status_data.get("name") or "")
+                        if isinstance(status_data, dict)
+                        else ""
+                    ),
                 )
             active.append(active_issue)
     return active

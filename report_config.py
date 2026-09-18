@@ -62,6 +62,18 @@ class ReleaseBlockerSettings:
 
 
 @dataclass(frozen=True)
+class DeliveryMetricsSettings:
+    """Settings for changelog-derived flow metrics and the static dashboard."""
+
+    enabled: bool = False
+    lookback_days: int = 30
+    snapshot_dir: str = "metrics"
+    dashboard_path: str = "dashboard.html"
+    sprint_field: str | None = None
+    aging_wip_days: int = 5
+
+
+@dataclass(frozen=True)
 class ReportSettings:
     teams: tuple[Team, ...]
     ai: AISettings
@@ -71,6 +83,7 @@ class ReportSettings:
     deploy_statuses: frozenset[str]
     done_statuses: frozenset[str]
     review_statuses: frozenset[str]
+    delivery_metrics: DeliveryMetricsSettings = DeliveryMetricsSettings()
 
     def team(self, team_id: str) -> Team:
         normalized = team_id.strip().casefold()
@@ -168,6 +181,12 @@ def _weekday(value: Any, path: str) -> int:
             f"{path} must be one of: {', '.join(WEEKDAYS)}"
         )
     return WEEKDAYS[name]
+
+
+def _positive_int(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ReportConfigError(f"{path} must be a positive whole number")
+    return value
 
 
 def _statuses(
@@ -379,6 +398,51 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                     "mapping when release blockers are enabled"
                 )
 
+    metrics_raw = _mapping(
+        root.get("delivery_metrics", {}), "delivery_metrics"
+    )
+    metrics_enabled = metrics_raw.get("enabled", False)
+    if not isinstance(metrics_enabled, bool):
+        raise ReportConfigError("delivery_metrics.enabled must be true or false")
+    lookback_days = _positive_int(
+        metrics_raw.get("lookback_days", 30), "delivery_metrics.lookback_days"
+    )
+    aging_wip_days = _positive_int(
+        metrics_raw.get("aging_wip_days", 5), "delivery_metrics.aging_wip_days"
+    )
+    snapshot_dir = (
+        _string(
+            metrics_raw.get("snapshot_dir"),
+            "delivery_metrics.snapshot_dir",
+            required=False,
+        )
+        or "metrics"
+    )
+    dashboard_path = (
+        _string(
+            metrics_raw.get("dashboard_path"),
+            "delivery_metrics.dashboard_path",
+            required=False,
+        )
+        or "dashboard.html"
+    )
+    sprint_field = _string(
+        metrics_raw.get("sprint_field"),
+        "delivery_metrics.sprint_field",
+        required=False,
+    )
+    if metrics_enabled:
+        for index, team in enumerate(teams):
+            if not (
+                team.projects
+                or team.filters
+                or (team.team_field and team.team_value)
+            ):
+                raise ReportConfigError(
+                    f"teams[{index}] needs projects, filters, or a Team-field "
+                    "mapping when delivery metrics are enabled"
+                )
+
     return ReportSettings(
         teams=tuple(teams),
         ai=ai,
@@ -386,6 +450,14 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
         release_blockers=ReleaseBlockerSettings(
             enabled=release_blockers_enabled,
             label=release_label,
+        ),
+        delivery_metrics=DeliveryMetricsSettings(
+            enabled=metrics_enabled,
+            lookback_days=lookback_days,
+            snapshot_dir=snapshot_dir,
+            dashboard_path=dashboard_path,
+            sprint_field=sprint_field,
+            aging_wip_days=aging_wip_days,
         ),
         blocked_statuses=_statuses(
             root, "blocked_statuses", ("blocked", "impediment")
