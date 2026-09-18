@@ -267,6 +267,31 @@ def _panel_note(total: int, shown: int) -> str:
     return f'<p class="note">Showing top {shown} of {total}.</p>'
 
 
+def _expandable_issue_rows(
+    issues: Iterable,
+    column: str,
+    jira_base_url: str | None,
+) -> str:
+    """Show the first page and reveal every remaining ticket on demand."""
+    listed = tuple(issues)
+    visible = _issue_rows(
+        listed[:MAX_ROWS],
+        column,
+        jira_base_url,
+        limit=None,
+    )
+    remaining = listed[MAX_ROWS:]
+    if not remaining:
+        return visible
+    return (
+        f"{visible}"
+        '<details class="more">'
+        f"<summary>Show {len(remaining)} more tickets</summary>"
+        f"{_issue_rows(remaining, column, jira_base_url, limit=None)}"
+        "</details>"
+    )
+
+
 def _squad_section(
     summary: TeamMetrics,
     trend: Sequence[TrendPoint],
@@ -285,14 +310,12 @@ def _squad_section(
         f"{_sparkline(trend)}</div>"
         '<div class="panels">'
         f'<div class="panel"><h3>Aging work in progress</h3>'
-        f"{_issue_rows(summary.aging_wip, 'age', jira_base_url)}"
-        f"{_panel_note(len(summary.aging_wip), MAX_ROWS)}</div>"
+        f"{_expandable_issue_rows(summary.aging_wip, 'age', jira_base_url)}</div>"
         f'<div class="panel"><h3>{blocked_heading}'
         f' <span class="count">{len(blocked)}</span></h3>'
         f"{_issue_rows(blocked, 'blocked', jira_base_url, limit=None)}</div>"
         f'<div class="panel"><h3>Chronic carry-over</h3>'
-        f"{_issue_rows(summary.chronic_carry_over, 'carry', jira_base_url)}"
-        f"{_panel_note(len(summary.chronic_carry_over), MAX_ROWS)}</div>"
+        f"{_expandable_issue_rows(summary.chronic_carry_over, 'carry', jira_base_url)}</div>"
         "</div></section>"
     )
 
@@ -416,6 +439,11 @@ thead th abbr { text-decoration: underline dotted; cursor: help; }
 .key a { color: inherit; text-decoration: none; border-bottom: 1px solid #c3cad4; }
 .key a:hover { border-bottom-color: currentColor; }
 .total a { color: inherit; font-weight: 650; text-decoration: underline; }
+.more { margin-top: .6rem; }
+.more summary { width: fit-content; color: #3568a8; cursor: pointer;
+  font-size: .82rem; font-weight: 600; }
+.more[open] summary { margin-bottom: .5rem; }
+.more .issues { margin-top: .2rem; }
 .tabs > input { position: absolute; opacity: 0; width: 0; height: 0; }
 .tabs > .view { display: none; }
 .tabbar { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem;
@@ -440,6 +468,7 @@ thead th abbr { text-decoration: underline dotted; cursor: help; }
   .track { background: #252932; }
   .count { background: #252932; color: #99a2b0; }
   .key a { border-bottom-color: #3a414d; }
+  .more summary { color: #78a9e6; }
   .tabbar label { background: #1c1f24; border-color: #2c313a; }
   .tabhint { color: #99a2b0; }
 }

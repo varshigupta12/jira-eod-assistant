@@ -326,6 +326,29 @@ class ReleaseFilterTests(unittest.TestCase):
         for index in range(1, 16):
             self.assertIn(f"EM-{index}<", markup)
 
+    def test_long_aging_list_expands_without_javascript(self):
+        config = settings()
+        issues = tuple(
+            metric(
+                f"EM-{index}",
+                age_in_status_days=float(index + 10),
+            )
+            for index in range(1, 23)
+        )
+        views = [
+            ReleaseView(
+                None,
+                (summarize(snapshot(issues=issues), config),),
+            )
+        ]
+
+        markup = render_dashboard(views, {}, config, NOW)
+
+        self.assertIn("<details", markup)
+        self.assertIn("<summary>Show 12 more tickets</summary>", markup)
+        self.assertIn("EM-22<", markup)
+        self.assertNotIn("<script", markup.casefold())
+
     def test_ticket_keys_link_to_jira_when_a_base_url_is_known(self):
         config = settings()
         issues = (metric("EM-1", is_blocked=True, blocked_days=3.0),)
