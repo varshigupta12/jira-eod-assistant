@@ -201,8 +201,8 @@ review_statuses: [In Review, Code Review]
 | `name` | Yes | Display heading in reports |
 | `projects` | For project filtering | One project key or a list |
 | `filters` | For saved-filter filtering | One Jira saved-filter name/ID or a list |
-| `release_labels` | No | Stable squad labels used to scope historical dashboard releases |
-| `release_scope_jql` | No | Custom ownership predicate for historical releases; overrides `release_labels` |
+| `release_labels` | No | Stable squad labels used to scope dashboard releases |
+| `release_scope_jql` | No | Custom ownership predicate for every release; overrides `release_labels` |
 | `boards` | For sprint reports | One board ID or a list |
 | `daily` | No | Format, local time, IANA timezone, and optional weekdays |
 | `include_in_pulse` | No | Defaults to `true`; set `false` to omit the team |
@@ -311,8 +311,8 @@ no date boundary, so every matching issue is counted. A **Recent work** tab
 uses `lookback_days` for a release-independent operational view.
 
 If a saved board filter represents only current work, set `release_labels` on
-each team to a durable ownership label. Historical release queries then use the
-team's projects plus those labels instead of the current board filter:
+each team to a durable ownership label. Release queries then use the team's
+projects plus those labels instead of the current board filter:
 
 ```yaml
 teams:
@@ -322,9 +322,6 @@ teams:
     filters: ["Current Platform board"]
     release_labels: [platform-team]
 ```
-
-The configured current release continues to use the current board filters;
-`release_labels` apply only to historical releases.
 
 For boards whose ownership also depends on Jira Team fields or assignees, use a
 trusted configuration-only JQL predicate:
@@ -336,9 +333,9 @@ release_scope_jql: >-
   OR assignee in (account-id-1, account-id-2)
 ```
 
-This predicate replaces the saved filter only for historical release queries.
-The reporter wraps it in parentheses and still applies the team's project and
-selected release constraints.
+This predicate replaces the saved filter for every release query, including the
+current release. The reporter wraps it in parentheses and still applies the
+team's project and selected release constraints.
 
 ```yaml
 delivery_metrics:
