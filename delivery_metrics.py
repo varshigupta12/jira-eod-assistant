@@ -58,6 +58,7 @@ class TeamMetrics:
     team_id: str
     team_name: str
     captured_at: str
+    total: int
     throughput: int
     cycle_time_median_days: float | None
     cycle_time_p85_days: float | None
@@ -91,7 +92,15 @@ def build_release_metrics_jql(
     use_release_labels: bool = True,
 ) -> str:
     """Scope a squad to every issue in the selected releases."""
-    if use_release_labels and team.release_labels:
+    if use_release_labels and team.release_scope_jql:
+        clauses = []
+        if team.projects:
+            projects = " OR ".join(
+                f'project = "{_jql_quote(project)}"' for project in team.projects
+            )
+            clauses.append(f"({projects})")
+        clauses.append(f"({team.release_scope_jql})")
+    elif use_release_labels and team.release_labels:
         clauses = []
         if team.projects:
             projects = " OR ".join(
@@ -241,6 +250,24 @@ def _raw_fix_versions(issue: Mapping[str, Any]) -> tuple[str, ...]:
     return _fix_versions(fields)
 
 
+def _release_matches(
+    issue: Mapping[str, Any], releases: Sequence[str]
+) -> tuple[str, ...]:
+    """Release scopes matched by an issue returned from a scoped query."""
+    fields = issue.get("fields")
+    if not isinstance(fields, dict):
+        return ()
+    values = {
+        value.strip().casefold()
+        for value in (*_fix_versions(fields), *_labels(fields))
+    }
+    return tuple(
+        release
+        for release in releases
+        if release.strip().casefold() in values
+    )
+
+
 def fetch_team_issues(
     team: Team,
     config: Config,
@@ -280,6 +307,7 @@ def fetch_team_issues(
     for issue in recent:
         marked = dict(issue)
         marked["_delivery_in_lookback"] = True
+        marked["_delivery_release_scopes"] = []
         combined[str(issue.get("key") or id(issue))] = marked
     if selected:
         current_release = (
@@ -295,10 +323,11 @@ def fetch_team_issues(
             for release in selected
             if release.strip().casefold() != current_release
         ]
-        complete: list[dict[str, Any]] = []
+        complete: list[tuple[dict[str, Any], Sequence[str]]] = []
         if current:
             complete.extend(
-                _search_issues(
+                (issue, current)
+                for issue in _search_issues(
                     team,
                     config,
                     settings,
@@ -310,7 +339,8 @@ def fetch_team_issues(
             )
         if historical:
             complete.extend(
-                _search_issues(
+                (issue, historical)
+                for issue in _search_issues(
                     team,
                     config,
                     settings,
@@ -318,11 +348,25 @@ def fetch_team_issues(
                     build_release_metrics_jql(team, historical),
                 )
             )
-        for issue in complete:
+        for issue, queried_releases in complete:
             key = str(issue.get("key") or id(issue))
-            if key not in combined:
+            matches = _release_matches(issue, queried_releases)
+            if not matches:
+                continue
+            if key in combined:
+                marked = dict(combined[key])
+                scopes = {
+                    str(scope).strip().casefold(): str(scope).strip()
+                    for scope in marked.get("_delivery_release_scopes", [])
+                }
+                for match in matches:
+                    scopes.setdefault(match.strip().casefold(), match.strip())
+                marked["_delivery_release_scopes"] = list(scopes.values())
+                combined[key] = marked
+            else:
                 marked = dict(issue)
                 marked["_delivery_in_lookback"] = False
+                marked["_delivery_release_scopes"] = list(matches)
                 combined[key] = marked
     return list(combined.values())
 
@@ -447,6 +491,15 @@ def issue_metric(
             else normalized not in {"to do", "open", "backlog"}
             and not is_done
         ),
+        release_scopes=(
+            tuple(
+                str(scope).strip()
+                for scope in issue["_delivery_release_scopes"]
+                if str(scope).strip()
+            )
+            if isinstance(issue.get("_delivery_release_scopes"), list)
+            else None
+        ),
     )
 
 def _started_statuses(
@@ -508,6 +561,11 @@ def in_release(issue: IssueMetric, release: str | None) -> bool:
     if not release:
         return True
     wanted = release.strip().casefold()
+    if issue.release_scopes is not None:
+        return any(
+            name.strip().casefold() == wanted
+            for name in issue.release_scopes
+        )
     return any(
         name.strip().casefold() == wanted
         for name in (*issue.fix_versions, *issue.labels)
@@ -594,6 +652,7 @@ def summarize(
         team_id=snapshot.team_id,
         team_name=snapshot.team_name,
         captured_at=snapshot.captured_at,
+        total=len(scoped),
         throughput=len(completed),
         cycle_time_median_days=format_days(duration_percentile(cycle_times, 0.5)),
         cycle_time_p85_days=format_days(duration_percentile(cycle_times, 0.85)),

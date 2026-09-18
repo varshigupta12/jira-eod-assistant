@@ -198,6 +198,25 @@ class JqlTests(unittest.TestCase):
         self.assertIn('filter = "Current APAC board"', jql)
         self.assertNotIn('labels = "pfe-apac"', jql)
 
+    def test_custom_historical_release_scope_uses_full_ownership_rule(self):
+        from delivery_metrics import build_release_metrics_jql
+
+        jql = build_release_metrics_jql(
+            team(
+                filters=("Current APAC board",),
+                release_labels=("pfe-apac",),
+                release_scope_jql=(
+                    '"Team[Team]" = team-id OR labels = "pfe-apac" '
+                    "OR assignee in (account-id)"
+                ),
+            ),
+            ("26.04",),
+        )
+
+        self.assertIn('"Team[Team]" = team-id', jql)
+        self.assertIn("assignee in (account-id)", jql)
+        self.assertNotIn("Current APAC board", jql)
+
 
 class FetchTests(unittest.TestCase):
     def setUp(self):
@@ -341,6 +360,29 @@ class FetchTests(unittest.TestCase):
 
         self.assertEqual([item["key"] for item in issues], ["ENG-1"])
         self.assertFalse(issues[0]["_delivery_in_lookback"])
+
+    def test_recent_stale_label_does_not_leak_into_historical_release_scope(self):
+        recent = Mock()
+        recent.raise_for_status.return_value = None
+        recent.json.return_value = {
+            "issues": [issue("ENG-1", "In Progress", labels=("26.04",))]
+        }
+        historical = Mock()
+        historical.raise_for_status.return_value = None
+        historical.json.return_value = {"issues": []}
+        session = Mock()
+        session.get.side_effect = [recent, historical]
+
+        issues = fetch_team_issues(
+            team(),
+            self._config(),
+            settings(),
+            session,
+            releases=("26.04",),
+        )
+        measured = issue_metric(issues[0], settings(), NOW)
+
+        self.assertEqual(measured.release_scopes, ())
 
 
 class IssueMetricTests(unittest.TestCase):

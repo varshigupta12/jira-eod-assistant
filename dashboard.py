@@ -156,6 +156,7 @@ def _comparison_table(summaries: Sequence[TeamMetrics]) -> str:
         rows.append(
             "<tr>"
             f'<th scope="row">{_icon(summary.team_id)} {_escape(summary.team_name)}</th>'
+            f"<td>{summary.total}</td>"
             f"<td>{summary.throughput}"
             f'<div class="track">{_bar(summary.throughput, busiest, "good")}</div></td>'
             f"<td>{summary.wip}</td>"
@@ -170,6 +171,7 @@ def _comparison_table(summaries: Sequence[TeamMetrics]) -> str:
     return (
         '<table class="compare"><thead><tr>'
         "<th>Squad</th>"
+        "<th>Total tickets</th>"
         "<th>Completed</th>"
         "<th>In flight</th>"
         "<th>Blocked</th>"

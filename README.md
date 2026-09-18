@@ -202,6 +202,7 @@ review_statuses: [In Review, Code Review]
 | `projects` | For project filtering | One project key or a list |
 | `filters` | For saved-filter filtering | One Jira saved-filter name/ID or a list |
 | `release_labels` | No | Stable squad labels used to scope historical dashboard releases |
+| `release_scope_jql` | No | Custom ownership predicate for historical releases; overrides `release_labels` |
 | `boards` | For sprint reports | One board ID or a list |
 | `daily` | No | Format, local time, IANA timezone, and optional weekdays |
 | `include_in_pulse` | No | Defaults to `true`; set `false` to omit the team |
@@ -324,6 +325,20 @@ teams:
 
 The configured current release continues to use the current board filters;
 `release_labels` apply only to historical releases.
+
+For boards whose ownership also depends on Jira Team fields or assignees, use a
+trusted configuration-only JQL predicate:
+
+```yaml
+release_scope_jql: >-
+  "Team[Team]" = your-team-id
+  OR labels = "platform-team"
+  OR assignee in (account-id-1, account-id-2)
+```
+
+This predicate replaces the saved filter only for historical release queries.
+The reporter wraps it in parentheses and still applies the team's project and
+selected release constraints.
 
 ```yaml
 delivery_metrics:

@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
-SCHEMA_VERSION = 4
-SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, SCHEMA_VERSION})
+SCHEMA_VERSION = 5
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2, 3, 4, SCHEMA_VERSION})
 DEFAULT_SNAPSHOT_DIR = "metrics"
 _SAFE_SEGMENT = re.compile(r"[^a-z0-9_-]+")
 
@@ -46,6 +46,7 @@ class IssueMetric:
     labels: tuple[str, ...] = ()
     in_lookback: bool = True
     is_started: bool = True
+    release_scopes: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -113,6 +114,16 @@ def _issue_from_payload(payload: Mapping[str, Any]) -> IssueMetric:
         for key in IssueMetric.__dataclass_fields__
         if key in payload
     }
+    fix_versions = _names(
+        known.get("fix_versions") or payload.get("releases")
+    )
+    labels = _names(known.get("labels"))
+    if "release_scopes" not in payload:
+        release_scopes = tuple((*fix_versions, *labels))
+    elif payload.get("release_scopes") is None:
+        release_scopes = None
+    else:
+        release_scopes = _names(payload.get("release_scopes"))
     return IssueMetric(
         key=str(known.get("key") or "Unknown"),
         summary=str(known.get("summary") or ""),
@@ -126,10 +137,8 @@ def _issue_from_payload(payload: Mapping[str, Any]) -> IssueMetric:
         lead_time_days=known.get("lead_time_days"),
         flow_efficiency=known.get("flow_efficiency"),
         carry_over_sprints=int(known.get("carry_over_sprints") or 0),
-        fix_versions=_names(
-            known.get("fix_versions") or payload.get("releases")
-        ),
-        labels=_names(known.get("labels")),
+        fix_versions=fix_versions,
+        labels=labels,
         in_lookback=bool(known.get("in_lookback", True)),
         is_started=bool(
             known.get(
@@ -138,6 +147,7 @@ def _issue_from_payload(payload: Mapping[str, Any]) -> IssueMetric:
                 not in {"to do", "open", "backlog"},
             )
         ),
+        release_scopes=release_scopes,
     )
 
 

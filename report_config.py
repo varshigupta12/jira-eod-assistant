@@ -36,6 +36,7 @@ class Team:
     daily_schedule: DailySchedule | None
     include_in_pulse: bool
     release_labels: tuple[str, ...] = ()
+    release_scope_jql: str | None = None
 
 
 @dataclass(frozen=True)
@@ -300,6 +301,11 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
         release_labels = _strings(
             item.get("release_labels"), f"{path_prefix}.release_labels"
         )
+        release_scope_jql = _string(
+            item.get("release_scope_jql"),
+            f"{path_prefix}.release_scope_jql",
+            required=False,
+        )
         if daily_schedule:
             if daily_schedule.report_format == "epic" and not board_values:
                 raise ReportConfigError(
@@ -324,6 +330,7 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                 daily_schedule=daily_schedule,
                 include_in_pulse=include_in_pulse,
                 release_labels=release_labels,
+                release_scope_jql=release_scope_jql,
             )
         )
 
