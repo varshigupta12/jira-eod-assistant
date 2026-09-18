@@ -18,12 +18,17 @@ from eod_report import (
     _fetch_issue_changelog,
     _issue_comments,
     _jql_quote,
-    _parse_jira_datetime,
-    _status_transitions,
+    build_team_scope_clauses,
     generate_ai_updates,
     request_error_summary,
 )
 from format_c_report import _display_text
+from metrics import (
+    continuous_entry,
+    format_duration,
+    issue_created,
+    status_intervals,
+)
 from report_config import ReportSettings, Team
 
 
@@ -73,21 +78,7 @@ def build_release_blocker_jql(
     blocked_statuses: frozenset[str],
 ) -> str:
     """Build a squad-scoped query for all current-release blockers."""
-    clauses = []
-    if team.projects:
-        projects = " OR ".join(
-            f'project = "{_jql_quote(project)}"' for project in team.projects
-        )
-        clauses.append(f"({projects})")
-    if team.filters:
-        filters = " OR ".join(
-            f'filter = "{_jql_quote(value)}"' for value in team.filters
-        )
-        clauses.append(f"({filters})")
-    elif team.team_field and team.team_value:
-        clauses.append(
-            f'"{_jql_quote(team.team_field)}" = "{_jql_quote(team.team_value)}"'
-        )
+    clauses = build_team_scope_clauses(team)
     if not clauses:
         raise EODReportError(
             f"{team.name} needs projects, filters, or a Team-field mapping"
@@ -152,17 +143,13 @@ def _fetch_team_blockers(
 
 
 def _blocked_since(
-    histories: list[Mapping[str, Any]], blocked_statuses: frozenset[str]
+    histories: list[Mapping[str, Any]],
+    blocked_statuses: frozenset[str],
+    created: datetime | None = None,
+    current_status: str = "",
 ) -> datetime | None:
-    blocked_since = None
-    for created, previous, current in _status_transitions(histories):
-        previous_is_blocked = previous.strip().casefold() in blocked_statuses
-        current_is_blocked = current.strip().casefold() in blocked_statuses
-        if current_is_blocked and not previous_is_blocked:
-            blocked_since = created
-        elif not current_is_blocked:
-            blocked_since = None
-    return blocked_since
+    intervals = status_intervals(histories, created, current_status)
+    return continuous_entry(intervals, blocked_statuses)
 
 
 def _blocked_duration(
@@ -170,20 +157,7 @@ def _blocked_duration(
 ) -> str | None:
     if blocked_since is None:
         return None
-    elapsed_seconds = max(
-        0,
-        int((now - blocked_since.astimezone(timezone.utc)).total_seconds()),
-    )
-    days, remainder = divmod(elapsed_seconds, 24 * 60 * 60)
-    hours = remainder // (60 * 60)
-    if days == 0 and hours == 0:
-        return "<1 hour"
-    parts = []
-    if days:
-        parts.append(f"{days} {'day' if days == 1 else 'days'}")
-    if hours:
-        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
-    return " ".join(parts)
+    return format_duration(now - blocked_since.astimezone(timezone.utc))
 
 
 def collect_release_blockers(
@@ -226,14 +200,17 @@ def collect_release_blockers(
                 enriched_fields["comment"] = comments
             enriched_issue["fields"] = enriched_fields
             histories = _fetch_issue_changelog(key, config, session)
+            status_data = fields.get("status")
             blocked_since = _blocked_since(
-                histories, config.blocked_statuses
+                histories,
+                config.blocked_statuses,
+                created=issue_created(fields),
+                current_status=(
+                    str(status_data.get("name") or "")
+                    if isinstance(status_data, dict)
+                    else ""
+                ),
             )
-            if blocked_since is None and isinstance(fields.get("created"), str):
-                try:
-                    blocked_since = _parse_jira_datetime(fields["created"])
-                except ValueError:
-                    pass
             duration_data[key] = (
                 blocked_since,
                 _blocked_duration(blocked_since, current_time),

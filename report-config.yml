@@ -5,6 +5,7 @@ teams:
     name: Platform
     projects: [PLAT]
     filters: ["Platform delivery board"]
+    release_labels: [platform-team]
     boards: [101]
     daily:
       format: epic
@@ -15,6 +16,7 @@ teams:
     name: Services
     projects: [SVC]
     filters: ["Services sprint board"]
+    release_labels: [services-team]
     boards: [202]
     daily:
       format: status
@@ -25,6 +27,7 @@ teams:
     name: Mobile
     projects: [APP]
     filters: ["Mobile delivery board"]
+    release_labels: [mobile-team]
     boards: [303]
     daily:
       format: assignee
@@ -48,6 +51,15 @@ pulse:
 release_blockers:
   enabled: true
   label: "2026.1"
+
+delivery_metrics:
+  enabled: true
+  lookback_days: 30
+  aging_wip_days: 5
+  snapshot_dir: metrics
+  dashboard_path: delivery-dashboard.html
+  # Replace with your Jira site's Sprint custom field to enable carry-over.
+  sprint_field: customfield_10020
 
 blocked_statuses: [Blocked, Impediment]
 deploy_statuses: [To Be Deployed, Ready for Deployment, Ready to Deploy]
