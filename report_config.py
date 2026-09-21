@@ -76,6 +76,12 @@ class DeliveryMetricsSettings:
 
 
 @dataclass(frozen=True)
+class SourceControlSettings:
+    enabled: bool = False
+    github_organization: str | None = None
+
+
+@dataclass(frozen=True)
 class ReportSettings:
     teams: tuple[Team, ...]
     ai: AISettings
@@ -86,6 +92,7 @@ class ReportSettings:
     done_statuses: frozenset[str]
     review_statuses: frozenset[str]
     delivery_metrics: DeliveryMetricsSettings = DeliveryMetricsSettings()
+    source_control: SourceControlSettings = SourceControlSettings()
 
     def team(self, team_id: str) -> Team:
         normalized = team_id.strip().casefold()
@@ -455,6 +462,23 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                     "mapping when delivery metrics are enabled"
                 )
 
+    source_control_raw = _mapping(
+        root.get("source_control", {}), "source_control"
+    )
+    source_control_enabled = source_control_raw.get("enabled", False)
+    if not isinstance(source_control_enabled, bool):
+        raise ReportConfigError("source_control.enabled must be true or false")
+    github_organization = _string(
+        source_control_raw.get("github_organization"),
+        "source_control.github_organization",
+        required=False,
+    )
+    if source_control_enabled and not github_organization:
+        raise ReportConfigError(
+            "source_control.github_organization is required when source control "
+            "is enabled"
+        )
+
     return ReportSettings(
         teams=tuple(teams),
         ai=ai,
@@ -470,6 +494,10 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
             dashboard_path=dashboard_path,
             sprint_field=sprint_field,
             aging_wip_days=aging_wip_days,
+        ),
+        source_control=SourceControlSettings(
+            enabled=source_control_enabled,
+            github_organization=github_organization,
         ),
         blocked_statuses=_statuses(
             root, "blocked_statuses", ("blocked", "impediment")

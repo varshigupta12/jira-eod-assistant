@@ -1,5 +1,10 @@
 version: 1
 
+source_control:
+  enabled: false
+  # Required when enabled. Only formally linked PRs in this organization are read.
+  github_organization: your-github-organization
+
 teams:
   - id: platform
     name: Platform

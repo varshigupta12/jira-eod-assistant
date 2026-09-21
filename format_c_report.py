@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -16,10 +17,14 @@ from eod_report import (
     EODReportError,
     filter_issues_with_recent_activity,
     get_latest_comment,
+    get_latest_scm_text,
     get_recent_comment,
+    get_recent_scm_activity,
+    get_latest_worklog_text,
     request_error_summary,
 )
 from report_config import Team
+from source_control import SourceControlError, annotate_github_activity
 
 if TYPE_CHECKING:
     from pulse_report import PulseConfig
@@ -143,6 +148,7 @@ def _fetch_active_sprint_issues(
             "issuetype",
             "parent",
             "comment",
+            "worklog",
             "timespent",
             "timeoriginalestimate",
             *field_ids,
@@ -407,6 +413,8 @@ def load_format_c_groups(
     pulse_config: PulseConfig,
     session: requests.Session | None = None,
     now: datetime | None = None,
+    github_organization: str | None = None,
+    github_token: str | None = None,
 ) -> tuple[tuple[EpicGroup, ...], tuple[str, ...]]:
     """Load active-sprint issues and group recent activity by Epic."""
     client = session or requests.Session()
@@ -417,6 +425,30 @@ def load_format_c_groups(
         client,
         (*story_point_fields, *epic_link_fields),
     )
+    if github_organization and not github_token:
+        print(
+            f"Warning: GitHub activity unavailable for {team.name}; "
+            "SCM_GITHUB_TOKEN is not configured; using Jira activity only.",
+            file=sys.stderr,
+        )
+    elif github_organization and github_token:
+        try:
+            all_issues = annotate_github_activity(
+                all_issues,
+                eod_config.jira_base_url,
+                eod_config.jira_email,
+                eod_config.jira_api_token,
+                github_organization,
+                github_token,
+                client,
+                now,
+            )
+        except SourceControlError as exc:
+            print(
+                f"Warning: GitHub activity unavailable for {team.name}; "
+                f"using Jira activity only: {exc}",
+                file=sys.stderr,
+            )
     groups = group_format_c_issues(
         all_issues,
         eod_config,
@@ -502,14 +534,20 @@ def format_format_c_group_lines(
                 else "Unassigned"
             )
             comments = fields.get("comment")
+            worklogs = fields.get("worklog")
             recent_comment = get_recent_comment(
                 comments if isinstance(comments, dict) else None
+            )
+            recent_worklog = get_latest_worklog_text(
+                worklogs if isinstance(worklogs, dict) else None
             )
             latest_comment = (
                 get_latest_comment(comments)
                 if allow_older_comments and isinstance(comments, dict)
                 else None
             )
+            scm_activity = get_recent_scm_activity(issue)
+            recent_scm = get_latest_scm_text(issue)
             ticket_url = (
                 f"{config.jira_base_url}/browse/{quote(key, safe='-')}"
             )
@@ -520,10 +558,29 @@ def format_format_c_group_lines(
             )
             ai_update = enriched.get(key)
             update_line = None
-            source_comment = recent_comment or latest_comment
-            if source_comment:
-                update = ai_update.update if ai_update else source_comment
+            source_update = (
+                recent_comment or recent_worklog or recent_scm or latest_comment
+            )
+            if source_update:
+                update = ai_update.update if ai_update else source_update
                 update_line = f"> *{_display_text(update, 300)}*"
+            links = []
+            for entry in reversed(scm_activity):
+                url = entry.get("url")
+                repository = entry.get("repository")
+                reference = entry.get("reference")
+                if not url or not repository or not reference:
+                    continue
+                label = _display_text(f"{repository}{reference}", 120)
+                links.append(f"[{label}]({url})")
+                if len(links) == 3:
+                    break
+            if links:
+                links.reverse()
+                sources = f"> Sources: {' · '.join(links)}"
+                update_line = (
+                    f"{update_line}\n{sources}" if update_line else sources
+                )
             if category == "Blocked":
                 duration = issue.get("_eod_blocked_duration")
                 if isinstance(duration, str):

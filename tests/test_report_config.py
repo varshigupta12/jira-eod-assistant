@@ -53,6 +53,9 @@ pulse:
 release_blockers:
   enabled: true
   label: "2026.1"
+source_control:
+  enabled: true
+  github_organization: acme
 """
 
 
@@ -74,6 +77,29 @@ class ConfigTests(unittest.TestCase):
         )
         self.assertEqual(settings.pulse.title, "Engineering Pulse")
         self.assertEqual(settings.release_blockers.label, "2026.1")
+        self.assertTrue(settings.source_control.enabled)
+        self.assertEqual(settings.source_control.github_organization, "acme")
+
+    def test_source_control_defaults_disabled(self):
+        settings = self.load(
+            CONFIG.replace(
+                "source_control:\n"
+                "  enabled: true\n"
+                "  github_organization: acme\n",
+                "",
+            )
+        )
+
+        self.assertFalse(settings.source_control.enabled)
+        self.assertIsNone(settings.source_control.github_organization)
+
+    def test_enabled_source_control_requires_organization(self):
+        invalid = CONFIG.replace("  github_organization: acme\n", "")
+
+        with self.assertRaisesRegex(
+            ReportConfigError, "source_control.github_organization"
+        ):
+            self.load(invalid)
 
     def test_rejects_duplicate_team_ids(self):
         duplicate = CONFIG.replace(

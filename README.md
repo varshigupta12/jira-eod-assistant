@@ -21,6 +21,7 @@ metadata when external API requests fail.
 - Jira Cloud REST API authentication using a personal API token
 - Mattermost incoming-webhook delivery
 - Atlassian Document Format comment support
+- Optional activity from GitHub pull requests formally linked to Jira issues
 - Optional OpenRouter summaries grounded in Jira descriptions and comments
 - Configurable sprint-report title, cadence, timezone, and status names
 - Release matching through either Jira labels or Fix Version/s
@@ -36,6 +37,7 @@ GitHub Actions
     +-- daily-runner check
     |      +-- teams due in their local timezone
     |      +-- Jira board, saved-filter, or project query
+    |      +-- optional Jira-linked GitHub PR and commit activity
     |      +-- optional OpenRouter summary
     |      `-- Mattermost EOD post
     |
@@ -69,6 +71,10 @@ contains a three-team example.
 2. Create a Mattermost incoming webhook for the target channel.
 3. For intelligent summaries and highlight selection, create an
    [OpenRouter API key](https://openrouter.ai/settings/keys).
+4. To include linked GitHub activity, enable `source_control` and provide a
+   GitHub token. The built-in Actions token is sufficient for public
+   repositories; a separate read-only token is optional for private
+   repositories.
 
 ### 3. Add GitHub Actions secrets
 
@@ -81,6 +87,7 @@ Go to **Settings → Secrets and variables → Actions → New repository secret
 | `JIRA_API_TOKEN` | Yes | Atlassian personal API token |
 | `MATTERMOST_WEBHOOK_URL` | Yes | Mattermost incoming-webhook URL |
 | `OPENROUTER_API_KEY` | Optional | OpenRouter API key; raw Jira text is used when absent or unavailable |
+| `SCM_GITHUB_TOKEN` | When source control is enabled | GitHub token used only for Jira-linked PRs; the workflow falls back to `github.token` |
 
 No repository variables are required. Non-secret behavior lives in
 `report-config.yml`.
@@ -111,6 +118,9 @@ Add scheduling only in the private deployment repository after testing.
 ```yaml
 version: 1
 
+source_control:
+  enabled: false
+
 teams:
   - id: platform
     name: Platform
@@ -138,6 +148,10 @@ delivery_metrics:
 
 ```yaml
 version: 1
+
+source_control:
+  enabled: true
+  github_organization: acme
 
 teams:
   - id: backend
@@ -241,7 +255,39 @@ exclude Jira's **To Do** status category. They include:
 AI summaries are limited to concise, factual statements and validated as
 structured JSON before posting. If OpenRouter is unavailable, out of credits,
 rate-limited, or returns malformed output, the report still posts using exact
-recent Jira comments. Jira and Mattermost errors remain fatal.
+recent Jira comments or linked source activity. Jira and Mattermost errors
+remain fatal, except linked-activity lookups: those warn and continue with the
+Jira-only report.
+
+### Jira-linked GitHub activity
+
+Source-control enrichment is opt-in and organization-scoped:
+
+```yaml
+source_control:
+  enabled: true
+  github_organization: acme
+```
+
+For each active-sprint Jira issue, the reporter first checks Jira development
+data at `/rest/dev-status/1.0/issue/detail`. If Jira returns no pull-request
+URLs there, it checks the issue's standard remote links. It continues to GitHub
+only for an exact link shaped like
+`https://github.com/acme/repository/pull/123`; it never searches GitHub by Jira
+key or across the organization. Issues without a formally linked, in-scope PR
+make no GitHub API requests and retain Jira-only behavior.
+
+For each accepted PR, the reporter reads PR details and all paginated commits,
+reuses a PR shared by multiple Jira issues, deduplicates source URLs, and keeps
+only activity from the previous 24 hours. Recent linked activity can make a
+ticket appear even when no Jira comment was added. Format C shows the latest
+raw PR or commit text when Jira has no recent comment and appends up to three
+compact source links.
+
+When AI summaries are enabled, linked PR and commit facts are included in the
+structured OpenRouter context. The prompt requires concrete implementation
+detail, comparison with Jira facts, and prohibits treating code or PR existence
+alone as proof of completion.
 
 ### Sprint report behavior
 
@@ -380,6 +426,7 @@ export JIRA_EMAIL="you@company.com"
 export JIRA_API_TOKEN="..."
 export MATTERMOST_WEBHOOK_URL="https://mattermost.example/hooks/..."
 export OPENROUTER_API_KEY="..." # only when required
+export SCM_GITHUB_TOKEN="..." # only when source_control.enabled is true
 ```
 
 Run all configured daily teams:
@@ -457,6 +504,8 @@ The reporter does not modify Jira data.
 - Jira summaries, descriptions, statuses, recent comments, and comments from a
   ticket's current blocked period are sent to the selected OpenRouter model when
   AI is enabled.
+- Matched GitHub PR titles and recent commit metadata are also sent to the
+  selected OpenRouter model when both source control and AI are enabled.
 - Review your organization's data-handling requirements before enabling AI.
 - GitHub Actions secrets are masked and are not passed to pull requests from
   forks.
