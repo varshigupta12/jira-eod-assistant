@@ -1,0 +1,94 @@
+name: Delivery Metrics Dashboard
+
+on:
+  # Add a schedule only in a private deployment fork. The artifact contains
+  # Jira issue metadata and must not be generated in a public repository.
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  generate-dashboard:
+    if: github.event.repository.private == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: python -m pip install --require-hashes --requirement requirements.txt
+
+      - name: Restore prior metric snapshots
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous_run="$(
+            gh run list \
+              --workflow delivery_dashboard.yml \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId // empty'
+          )"
+          if [ -n "$previous_run" ]; then
+            artifact_id="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/actions/runs/$previous_run/artifacts" \
+                --jq '.artifacts[]
+                  | select(.name == "delivery-dashboard" and .expired == false)
+                  | .id' \
+                | head -n 1
+            )"
+            if [ -n "$artifact_id" ]; then
+              gh run download "$previous_run" \
+                --name delivery-dashboard \
+                --dir previous-dashboard
+              mkdir -p metrics
+              if [ -d previous-dashboard/metrics ]; then
+                find previous-dashboard/metrics \
+                  -type f -name '*.json' \
+                  -exec cp '{}' metrics/ ';'
+              fi
+            fi
+          fi
+
+      - name: Generate dashboard from Jira
+        env:
+          JIRA_DOMAIN: ${{ secrets.JIRA_DOMAIN }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          MATTERMOST_WEBHOOK_URL: ${{ secrets.MATTERMOST_WEBHOOK_URL }}
+        run: >-
+          python dashboard.py
+          --all-releases
+          --output delivery-dashboard.html
+
+      - name: Keep 90 days of trend snapshots
+        run: |
+          cutoff="$(date -u -d '90 days ago' +%F)"
+          for snapshot in metrics/*.json; do
+            [ -e "$snapshot" ] || continue
+            captured_date="$(basename "$snapshot" | cut -c1-10)"
+            if [[ "$captured_date" < "$cutoff" ]]; then
+              rm -- "$snapshot"
+            fi
+          done
+
+      - name: Upload private dashboard
+        uses: actions/upload-artifact@v4
+        with:
+          name: delivery-dashboard
+          path: |
+            delivery-dashboard.html
+            metrics
+          retention-days: 90
+          if-no-files-found: error

@@ -198,12 +198,21 @@ def main() -> int:
             if current_format == "epic":
                 pulse_config = pulse_config or PulseConfig.from_env()
                 groups, sprint_names = load_format_c_groups(
-                    team, config, pulse_config, client
+                    team,
+                    config,
+                    pulse_config,
+                    client,
+                    github_organization=(
+                        settings.source_control.github_organization
+                        if settings.source_control.enabled
+                        else None
+                    ),
+                    github_token=os.getenv("SCM_GITHUB_TOKEN", "").strip() or None,
                 )
                 issues = [issue for group in groups for issue in group.issues]
                 print(
-                    f"{len(issues)} active-sprint issue(s) had a recent comment "
-                    "or status change."
+                    f"{len(issues)} active-sprint issue(s) had a recent Jira "
+                    "or source-control update."
                 )
                 if dry_run:
                     continue

@@ -5,7 +5,8 @@ work from any number of Jira teams, creates concise updates, and posts:
 
 - daily EOD reports grouped by Epic, status, or assignee;
 - sprint-end highlights grouped by region and Epic in Format C;
-- current-release blockers grouped by team and ordered by blocked duration.
+- current-release blockers grouped by team and ordered by blocked duration;
+- a private, static cross-squad delivery dashboard with release filters.
 
 No Jira administrator access or hosted infrastructure is required. For live
 use, deploy from a private fork because Actions logs can reveal operational
@@ -20,9 +21,12 @@ metadata when external API requests fail.
 - Jira Cloud REST API authentication using a personal API token
 - Mattermost incoming-webhook delivery
 - Atlassian Document Format comment support
+- Optional activity from GitHub pull requests formally linked to Jira issues
 - Optional OpenRouter summaries grounded in Jira descriptions and comments
 - Configurable sprint-report title, cadence, timezone, and status names
 - Release matching through either Jira labels or Fix Version/s
+- Changelog-derived delivery metrics Jira cannot calculate natively
+- JavaScript-free HTML dashboard with Jira links and release tabs
 - Manual GitHub Actions runs for safe setup testing
 
 ## How it works
@@ -33,15 +37,21 @@ GitHub Actions
     +-- daily-runner check
     |      +-- teams due in their local timezone
     |      +-- Jira board, saved-filter, or project query
+    |      +-- optional Jira-linked GitHub PR and commit activity
     |      +-- optional OpenRouter summary
     |      `-- Mattermost EOD post
     |
-    `-- sprint-runner check
+    +-- sprint-runner check
            +-- teams and boards from report-config.yml
            +-- active/recent sprint issues
            +-- AI-selected done/blocked/carryover highlights
            +-- combined Mattermost sprint post
            `-- optional current-release blocker post
+    |
+    `-- delivery-dashboard run
+           +-- changelog-derived squad metrics
+           +-- retained trend snapshots
+           `-- private HTML artifact
 ```
 
 The public source workflows are manual-only by default. Configure scheduling in
@@ -61,6 +71,10 @@ contains a three-team example.
 2. Create a Mattermost incoming webhook for the target channel.
 3. For intelligent summaries and highlight selection, create an
    [OpenRouter API key](https://openrouter.ai/settings/keys).
+4. To include linked GitHub activity, enable `source_control` and provide a
+   GitHub token. The built-in Actions token is sufficient for public
+   repositories; a separate read-only token is optional for private
+   repositories.
 
 ### 3. Add GitHub Actions secrets
 
@@ -73,6 +87,7 @@ Go to **Settings → Secrets and variables → Actions → New repository secret
 | `JIRA_API_TOKEN` | Yes | Atlassian personal API token |
 | `MATTERMOST_WEBHOOK_URL` | Yes | Mattermost incoming-webhook URL |
 | `OPENROUTER_API_KEY` | Optional | OpenRouter API key; raw Jira text is used when absent or unavailable |
+| `SCM_GITHUB_TOKEN` | When source control is enabled | GitHub token used only for Jira-linked PRs; the workflow falls back to `github.token` |
 
 No repository variables are required. Non-secret behavior lives in
 `report-config.yml`.
@@ -89,6 +104,8 @@ In **Actions**:
 - Run **Sprint Highlights Report** with `full` to post the sprint report followed
   by current-release blockers, or use `blocked-only` to post only the blocker
   report.
+- In a private fork, run **Delivery Metrics Dashboard**, download the
+  `delivery-dashboard` artifact, and open `delivery-dashboard.html`.
 
 Add scheduling only in the private deployment repository after testing.
 
@@ -100,6 +117,9 @@ Add scheduling only in the private deployment repository after testing.
 
 ```yaml
 version: 1
+
+source_control:
+  enabled: false
 
 teams:
   - id: platform
@@ -119,12 +139,19 @@ pulse:
 
 release_blockers:
   enabled: false
+
+delivery_metrics:
+  enabled: false
 ```
 
 ### Multiple teams and boards
 
 ```yaml
 version: 1
+
+source_control:
+  enabled: true
+  github_organization: acme
 
 teams:
   - id: backend
@@ -166,6 +193,14 @@ release_blockers:
   enabled: true
   label: "2026.1"
 
+delivery_metrics:
+  enabled: true
+  lookback_days: 30
+  aging_wip_days: 5
+  snapshot_dir: metrics
+  dashboard_path: delivery-dashboard.html
+  sprint_field: customfield_10020
+
 blocked_statuses: [Blocked, Impediment, On Hold]
 deploy_statuses: [Ready for Deployment, To Be Deployed]
 done_statuses: [Done, Closed, Resolved]
@@ -180,6 +215,8 @@ review_statuses: [In Review, Code Review]
 | `name` | Yes | Display heading in reports |
 | `projects` | For project filtering | One project key or a list |
 | `filters` | For saved-filter filtering | One Jira saved-filter name/ID or a list |
+| `release_labels` | No | Stable squad labels used to scope dashboard releases |
+| `release_scope_jql` | No | Custom ownership predicate for every release; overrides `release_labels` |
 | `boards` | For sprint reports | One board ID or a list |
 | `daily` | No | Format, local time, IANA timezone, and optional weekdays |
 | `include_in_pulse` | No | Defaults to `true`; set `false` to omit the team |
@@ -218,7 +255,39 @@ exclude Jira's **To Do** status category. They include:
 AI summaries are limited to concise, factual statements and validated as
 structured JSON before posting. If OpenRouter is unavailable, out of credits,
 rate-limited, or returns malformed output, the report still posts using exact
-recent Jira comments. Jira and Mattermost errors remain fatal.
+recent Jira comments or linked source activity. Jira and Mattermost errors
+remain fatal, except linked-activity lookups: those warn and continue with the
+Jira-only report.
+
+### Jira-linked GitHub activity
+
+Source-control enrichment is opt-in and organization-scoped:
+
+```yaml
+source_control:
+  enabled: true
+  github_organization: acme
+```
+
+For each active-sprint Jira issue, the reporter first checks Jira development
+data at `/rest/dev-status/1.0/issue/detail`. If Jira returns no pull-request
+URLs there, it checks the issue's standard remote links. It continues to GitHub
+only for an exact link shaped like
+`https://github.com/acme/repository/pull/123`; it never searches GitHub by Jira
+key or across the organization. Issues without a formally linked, in-scope PR
+make no GitHub API requests and retain Jira-only behavior.
+
+For each accepted PR, the reporter reads PR details and all paginated commits,
+reuses a PR shared by multiple Jira issues, deduplicates source URLs, and keeps
+only activity from the previous 24 hours. Recent linked activity can make a
+ticket appear even when no Jira comment was added. Format C shows the latest
+raw PR or commit text when Jira has no recent comment and appends up to three
+compact source links.
+
+When AI summaries are enabled, linked PR and commit facts are included in the
+structured OpenRouter context. The prompt requires concrete implementation
+detail, comparison with Jira facts, and prohibits treating code or PR existence
+alone as proof of completion.
 
 ### Sprint report behavior
 
@@ -265,6 +334,84 @@ Update `release_blockers.label` at each release rollover. The public workflow is
 manual-only; a private deployment can schedule `full` mode to post this report
 immediately after each sprint pulse.
 
+### Delivery metrics dashboard
+
+The dashboard complements Jira's native burndown, velocity, and control charts
+with metrics Jira Cloud does not provide:
+
+| Metric | Meaning |
+| --- | --- |
+| Blocked duration | Continuous time each currently blocked ticket has been blocked, longest first |
+| Median delivery time | Half of completed tickets moved from first active status to done within this time |
+| 85th percentile delivery time | 85% of completed tickets moved from first active status to done within this time |
+| Throughput | Completed tickets in the selected release, or in the lookback window for Recent work |
+| Aging work in progress | In-flight tickets sitting in one non-blocked status beyond the configured threshold |
+| Chronic carry-over | In-flight tickets present in at least two sprints |
+| Flow efficiency | Percentage of elapsed delivery time spent in active work rather than blocked, review, or deployment queues |
+
+Each squad is shown side by side and then expanded into aging, blocked, and
+carry-over ticket lists. Ticket keys link to Jira. Up to six release tabs are discovered from recent **Fix Version/s**, plus the
+configured `release_blockers.label`; issues match a tab through either Fix
+Version/s or label. Once discovered, each release is queried separately with
+no date boundary, so every matching issue is counted. A **Recent work** tab
+uses `lookback_days` for a release-independent operational view.
+
+If a saved board filter represents only current work, set `release_labels` on
+each team to a durable ownership label. Release queries then use the team's
+projects plus those labels instead of the current board filter:
+
+```yaml
+teams:
+  - id: platform
+    name: Platform
+    projects: [PLAT]
+    filters: ["Current Platform board"]
+    release_labels: [platform-team]
+```
+
+For boards whose ownership also depends on Jira Team fields or assignees, use a
+trusted configuration-only JQL predicate:
+
+```yaml
+release_scope_jql: >-
+  "Team[Team]" = your-team-id
+  OR labels = "platform-team"
+  OR assignee in (account-id-1, account-id-2)
+```
+
+This predicate replaces the saved filter for every release query, including the
+current release. The reporter wraps it in parentheses and still applies the
+team's project and selected release constraints.
+
+```yaml
+delivery_metrics:
+  enabled: true
+  lookback_days: 30
+  aging_wip_days: 5
+  snapshot_dir: metrics
+  dashboard_path: delivery-dashboard.html
+  sprint_field: customfield_10020
+```
+
+Set `sprint_field` to the Sprint custom-field ID for your Jira site. Omit it if
+you do not need carry-over; that metric will remain zero. Find the ID through
+Jira's fields API or your browser's issue API response.
+
+The collector requests Jira search results with `expand=changelog` to avoid one
+API call per issue. Jira may truncate very large issue histories, so metrics for
+issues with exceptionally long changelogs can be incomplete.
+
+The generated file contains no JavaScript, external assets, or CDN calls.
+Ticket text is HTML-escaped. Release switching uses pre-rendered HTML and CSS,
+so the file works offline.
+
+The included workflow runs only when the repository is private. It restores the
+previous successful artifact's snapshots, retains 90 days of trend history, and
+uploads the HTML and snapshots as a private Actions artifact. Do not publish
+this dashboard with ordinary GitHub Pages: a Pages site backed by a private
+repository is still public unless the organization uses GitHub Enterprise
+Cloud Pages access control.
+
 ## Run locally
 
 Python 3.11 or newer is recommended.
@@ -279,6 +426,7 @@ export JIRA_EMAIL="you@company.com"
 export JIRA_API_TOKEN="..."
 export MATTERMOST_WEBHOOK_URL="https://mattermost.example/hooks/..."
 export OPENROUTER_API_KEY="..." # only when required
+export SCM_GITHUB_TOKEN="..." # only when source_control.enabled is true
 ```
 
 Run all configured daily teams:
@@ -311,6 +459,30 @@ Run only the current-release blocker report:
 PULSE_FORCE_RUN=true PULSE_REPORT_MODE=blocked-only python pulse_report.py
 ```
 
+Collect Jira metrics and write snapshots:
+
+```bash
+python delivery_metrics.py
+```
+
+Generate the dashboard with release tabs:
+
+```bash
+python dashboard.py --all-releases
+```
+
+Render from existing snapshots without querying Jira:
+
+```bash
+python dashboard.py --offline --all-releases
+```
+
+Render only one release:
+
+```bash
+python dashboard.py --release 2026.1
+```
+
 Use another configuration file with `REPORT_CONFIG=/path/to/config.yml`.
 
 ## Permissions
@@ -332,9 +504,13 @@ The reporter does not modify Jira data.
 - Jira summaries, descriptions, statuses, recent comments, and comments from a
   ticket's current blocked period are sent to the selected OpenRouter model when
   AI is enabled.
+- Matched GitHub PR titles and recent commit metadata are also sent to the
+  selected OpenRouter model when both source control and AI are enabled.
 - Review your organization's data-handling requirements before enabling AI.
 - GitHub Actions secrets are masked and are not passed to pull requests from
   forks.
+- Dashboard HTML and snapshot JSON contain Jira keys, summaries, assignees, and
+  derived delivery data. Keep the repository and downloaded artifact private.
 
 ## Troubleshooting
 
