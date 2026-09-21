@@ -35,6 +35,8 @@ class Team:
     team_value: str | None
     daily_schedule: DailySchedule | None
     include_in_pulse: bool
+    release_labels: tuple[str, ...] = ()
+    release_scope_jql: str | None = None
 
 
 @dataclass(frozen=True)
@@ -62,6 +64,24 @@ class ReleaseBlockerSettings:
 
 
 @dataclass(frozen=True)
+class DeliveryMetricsSettings:
+    """Settings for changelog-derived flow metrics and the static dashboard."""
+
+    enabled: bool = False
+    lookback_days: int = 30
+    snapshot_dir: str = "metrics"
+    dashboard_path: str = "dashboard.html"
+    sprint_field: str | None = None
+    aging_wip_days: int = 5
+
+
+@dataclass(frozen=True)
+class SourceControlSettings:
+    enabled: bool = False
+    github_organization: str | None = None
+
+
+@dataclass(frozen=True)
 class ReportSettings:
     teams: tuple[Team, ...]
     ai: AISettings
@@ -71,6 +91,8 @@ class ReportSettings:
     deploy_statuses: frozenset[str]
     done_statuses: frozenset[str]
     review_statuses: frozenset[str]
+    delivery_metrics: DeliveryMetricsSettings = DeliveryMetricsSettings()
+    source_control: SourceControlSettings = SourceControlSettings()
 
     def team(self, team_id: str) -> Team:
         normalized = team_id.strip().casefold()
@@ -168,6 +190,12 @@ def _weekday(value: Any, path: str) -> int:
             f"{path} must be one of: {', '.join(WEEKDAYS)}"
         )
     return WEEKDAYS[name]
+
+
+def _positive_int(value: Any, path: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ReportConfigError(f"{path} must be a positive whole number")
+    return value
 
 
 def _statuses(
@@ -277,6 +305,14 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
             )
         projects = _strings(item.get("projects"), f"{path_prefix}.projects")
         filters = _strings(item.get("filters"), f"{path_prefix}.filters")
+        release_labels = _strings(
+            item.get("release_labels"), f"{path_prefix}.release_labels"
+        )
+        release_scope_jql = _string(
+            item.get("release_scope_jql"),
+            f"{path_prefix}.release_scope_jql",
+            required=False,
+        )
         if daily_schedule:
             if daily_schedule.report_format == "epic" and not board_values:
                 raise ReportConfigError(
@@ -300,6 +336,8 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                 team_value=team_value,
                 daily_schedule=daily_schedule,
                 include_in_pulse=include_in_pulse,
+                release_labels=release_labels,
+                release_scope_jql=release_scope_jql,
             )
         )
 
@@ -379,6 +417,68 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
                     "mapping when release blockers are enabled"
                 )
 
+    metrics_raw = _mapping(
+        root.get("delivery_metrics", {}), "delivery_metrics"
+    )
+    metrics_enabled = metrics_raw.get("enabled", False)
+    if not isinstance(metrics_enabled, bool):
+        raise ReportConfigError("delivery_metrics.enabled must be true or false")
+    lookback_days = _positive_int(
+        metrics_raw.get("lookback_days", 30), "delivery_metrics.lookback_days"
+    )
+    aging_wip_days = _positive_int(
+        metrics_raw.get("aging_wip_days", 5), "delivery_metrics.aging_wip_days"
+    )
+    snapshot_dir = (
+        _string(
+            metrics_raw.get("snapshot_dir"),
+            "delivery_metrics.snapshot_dir",
+            required=False,
+        )
+        or "metrics"
+    )
+    dashboard_path = (
+        _string(
+            metrics_raw.get("dashboard_path"),
+            "delivery_metrics.dashboard_path",
+            required=False,
+        )
+        or "dashboard.html"
+    )
+    sprint_field = _string(
+        metrics_raw.get("sprint_field"),
+        "delivery_metrics.sprint_field",
+        required=False,
+    )
+    if metrics_enabled:
+        for index, team in enumerate(teams):
+            if not (
+                team.projects
+                or team.filters
+                or (team.team_field and team.team_value)
+            ):
+                raise ReportConfigError(
+                    f"teams[{index}] needs projects, filters, or a Team-field "
+                    "mapping when delivery metrics are enabled"
+                )
+
+    source_control_raw = _mapping(
+        root.get("source_control", {}), "source_control"
+    )
+    source_control_enabled = source_control_raw.get("enabled", False)
+    if not isinstance(source_control_enabled, bool):
+        raise ReportConfigError("source_control.enabled must be true or false")
+    github_organization = _string(
+        source_control_raw.get("github_organization"),
+        "source_control.github_organization",
+        required=False,
+    )
+    if source_control_enabled and not github_organization:
+        raise ReportConfigError(
+            "source_control.github_organization is required when source control "
+            "is enabled"
+        )
+
     return ReportSettings(
         teams=tuple(teams),
         ai=ai,
@@ -386,6 +486,18 @@ def load_report_config(path: str | os.PathLike[str] | None = None) -> ReportSett
         release_blockers=ReleaseBlockerSettings(
             enabled=release_blockers_enabled,
             label=release_label,
+        ),
+        delivery_metrics=DeliveryMetricsSettings(
+            enabled=metrics_enabled,
+            lookback_days=lookback_days,
+            snapshot_dir=snapshot_dir,
+            dashboard_path=dashboard_path,
+            sprint_field=sprint_field,
+            aging_wip_days=aging_wip_days,
+        ),
+        source_control=SourceControlSettings(
+            enabled=source_control_enabled,
+            github_organization=github_organization,
         ),
         blocked_statuses=_statuses(
             root, "blocked_statuses", ("blocked", "impediment")

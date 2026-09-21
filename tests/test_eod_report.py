@@ -14,6 +14,7 @@ from eod_report import (
     filter_issues_with_recent_activity,
     generate_ai_updates,
     get_latest_comment,
+    get_recent_worklogs,
     get_recent_comment,
     comment_body_to_text,
     parse_and_format,
@@ -197,6 +198,26 @@ class CommentTests(unittest.TestCase):
             "Rejected because the deployment path is unsupported.",
         )
 
+    def test_returns_recent_worklog_text(self):
+        worklogs = {
+            "worklogs": [
+                {
+                    "started": "2026-08-14T11:00:00+00:00",
+                    "timeSpent": "1h",
+                    "comment": "Implemented pagination",
+                },
+                {
+                    "started": "2026-08-13T11:00:00+00:00",
+                    "timeSpent": "2h",
+                },
+            ]
+        }
+
+        self.assertEqual(
+            get_recent_worklogs(worklogs, self.NOW),
+            ["Implemented pagination"],
+        )
+
     def test_preserves_jira_smart_link_urls(self):
         body = {
             "type": "doc",
@@ -358,6 +379,52 @@ class JiraTests(unittest.TestCase):
         )
 
         self.assertEqual(active[0]["_eod_blocked_duration"], "2 days 6 hours")
+
+    def test_linked_scm_activity_is_recent_without_changelog_request(self):
+        ticket = make_issue("APAC-1", "In Progress")
+        ticket["_eod_scm_activity"] = [
+            {
+                "source": "commit",
+                "timestamp": "2026-08-14T11:00:00+00:00",
+                "text": "Implement retry handling",
+                "url": "https://github.com/acme/repo/commit/abc",
+                "repository": "acme/repo",
+                "reference": "@abcdef0",
+            }
+        ]
+        session = Mock()
+
+        active = filter_issues_with_recent_activity(
+            [ticket],
+            make_config(),
+            session,
+            datetime(2026, 8, 14, 12, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual([item["key"] for item in active], ["APAC-1"])
+        session.get.assert_not_called()
+
+    def test_recent_worklog_is_activity_without_changelog_request(self):
+        ticket = make_issue("APAC-1", "In Progress")
+        ticket["fields"]["worklog"] = {
+            "worklogs": [
+                {
+                    "started": "2026-08-14T11:00:00+00:00",
+                    "comment": "Implemented pagination",
+                }
+            ]
+        }
+        session = Mock()
+
+        active = filter_issues_with_recent_activity(
+            [ticket],
+            make_config(),
+            session,
+            datetime(2026, 8, 14, 12, tzinfo=timezone.utc),
+        )
+
+        self.assertEqual([item["key"] for item in active], ["APAC-1"])
+        session.get.assert_not_called()
 
 
 class ReportTests(unittest.TestCase):
@@ -677,6 +744,56 @@ class OpenRouterTests(unittest.TestCase):
         prompt = request.kwargs["json"]["messages"][1]["content"]
         self.assertIn("at most 20 words", prompt)
         self.assertIn("Do not repeat the ticket key or title", prompt)
+
+    def test_compares_jira_and_scm_without_inferring_completion(self):
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {
+            "choices": [
+                {
+                    "message": {
+                        "content": json.dumps(
+                            {
+                                "issues": [
+                                    {
+                                        "key": "APAC-1",
+                                        "update": "Retry handling was added.",
+                                        "blocker_reason": "",
+                                    }
+                                ]
+                            }
+                        )
+                    }
+                }
+            ]
+        }
+        session = Mock()
+        session.post.return_value = response
+        ticket = make_issue("APAC-1", "In Progress")
+        ticket["_eod_scm_activity"] = [
+            {
+                "source": "commit",
+                "timestamp": "2026-08-14T11:00:00+00:00",
+                "text": "Add retry handling",
+                "url": "https://github.com/acme/repo/commit/abc",
+                "repository": "acme/repo",
+                "reference": "@abcdef0",
+            }
+        ]
+
+        generate_ai_updates(
+            [ticket],
+            make_config(
+                AI_SUMMARIZE="true", OPENROUTER_API_KEY="sk-or-test"
+            ),
+            session,
+            include_all_started=True,
+        )
+
+        prompt = session.post.call_args.kwargs["json"]["messages"][1]["content"]
+        self.assertIn("Compare Jira statements", prompt)
+        self.assertIn("Never infer completion merely", prompt)
+        self.assertIn("Add retry handling", prompt)
 
     def test_does_not_enrich_status_only_done_ticket(self):
         session = Mock()

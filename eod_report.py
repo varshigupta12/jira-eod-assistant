@@ -13,6 +13,15 @@ from urllib.parse import quote
 
 import requests
 
+from metrics import (
+    continuous_entry,
+    format_duration,
+    issue_created,
+    parse_jira_datetime,
+    status_intervals,
+    status_transitions,
+)
+
 DEFAULT_DONE_STATUSES = ("done", "closed", "resolved")
 DEFAULT_BLOCKED_STATUSES = ("blocked", "impediment")
 DEFAULT_DEPLOY_STATUSES = ("to be deployed", "ready for deployment", "ready to deploy")
@@ -195,6 +204,30 @@ def _jql_quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
+def build_team_scope_clauses(team: Any) -> list[str]:
+    """Build the JQL clauses that scope a query to one squad.
+
+    Saved filters take precedence over a Team-field mapping, matching the
+    daily report's behaviour.
+    """
+    clauses = []
+    if team.projects:
+        projects = " OR ".join(
+            f'project = "{_jql_quote(project)}"' for project in team.projects
+        )
+        clauses.append(f"({projects})")
+    if team.filters:
+        filters = " OR ".join(
+            f'filter = "{_jql_quote(value)}"' for value in team.filters
+        )
+        clauses.append(f"({filters})")
+    elif team.team_field and team.team_value:
+        clauses.append(
+            f'"{_jql_quote(team.team_field)}" = "{_jql_quote(team.team_value)}"'
+        )
+    return clauses
+
+
 def build_jql(config: Config) -> str:
     clauses = []
     if config.jira_projects:
@@ -234,7 +267,9 @@ def fetch_jira_tickets(
     while True:
         params = {
             "jql": build_jql(config),
-            "fields": "summary,description,assignee,status,issuetype,comment",
+            "fields": (
+                "summary,description,assignee,status,issuetype,comment,worklog"
+            ),
             "maxResults": 100,
         }
         if next_page_token:
@@ -307,11 +342,7 @@ def comment_body_to_text(body: Any) -> str:
 
 
 def _parse_jira_datetime(value: str) -> datetime:
-    normalized = value.strip().replace("Z", "+00:00")
-    parsed = datetime.fromisoformat(normalized)
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+    return parse_jira_datetime(value)
 
 
 def get_recent_comment(
@@ -393,6 +424,91 @@ def get_recent_comments(
         if created >= cutoff and text:
             recent.append((created, text))
     return [text for _, text in sorted(recent)]
+
+
+def get_recent_scm_activity(
+    issue: Mapping[str, Any],
+) -> list[dict[str, str]]:
+    """Return validated, chronologically sorted linked GitHub activity."""
+    raw_activity = issue.get("_eod_scm_activity")
+    if not isinstance(raw_activity, list):
+        return []
+    activity = []
+    for entry in raw_activity:
+        if not isinstance(entry, dict):
+            continue
+        source = entry.get("source")
+        timestamp = entry.get("timestamp")
+        text = entry.get("text")
+        if (
+            source not in {"commit", "pull_request"}
+            or not isinstance(timestamp, str)
+            or not timestamp.strip()
+            or not isinstance(text, str)
+            or not text.strip()
+        ):
+            continue
+        activity.append(
+            {
+                name: value
+                for name in (
+                    "source",
+                    "timestamp",
+                    "text",
+                    "url",
+                    "repository",
+                    "reference",
+                )
+                if isinstance((value := entry.get(name)), str) and value.strip()
+            }
+        )
+    return sorted(activity, key=lambda entry: entry["timestamp"])
+
+
+def get_latest_scm_text(issue: Mapping[str, Any]) -> str | None:
+    """Return the newest concrete PR or commit description for raw fallback."""
+    activity = get_recent_scm_activity(issue)
+    return activity[-1]["text"] if activity else None
+
+
+def get_recent_worklogs(
+    worklog_data: Mapping[str, Any] | None,
+    now: datetime | None = None,
+) -> list[str]:
+    """Return concrete Jira worklog text from the previous 24 hours."""
+    if not worklog_data:
+        return []
+    worklogs = worklog_data.get("worklogs", [])
+    if not isinstance(worklogs, list):
+        return []
+    current_time = now or datetime.now(timezone.utc)
+    if current_time.tzinfo is None:
+        current_time = current_time.replace(tzinfo=timezone.utc)
+    cutoff = current_time.astimezone(timezone.utc) - timedelta(hours=24)
+    recent = []
+    for worklog in worklogs:
+        if not isinstance(worklog, dict):
+            continue
+        try:
+            started = _parse_jira_datetime(str(worklog.get("started") or ""))
+        except ValueError:
+            continue
+        if started < cutoff or started > current_time:
+            continue
+        comment = comment_body_to_text(worklog.get("comment", ""))
+        time_spent = str(worklog.get("timeSpent") or "").strip()
+        text = comment or (f"Logged {time_spent}" if time_spent else "")
+        if text:
+            recent.append((started, text))
+    return [text for _, text in sorted(recent)]
+
+
+def get_latest_worklog_text(
+    worklog_data: Mapping[str, Any] | None,
+    now: datetime | None = None,
+) -> str | None:
+    worklogs = get_recent_worklogs(worklog_data, now)
+    return worklogs[-1] if worklogs else None
 
 
 def _comment_entries(
@@ -528,31 +644,7 @@ def _fetch_issue_changelog(
 def _status_transitions(
     histories: Sequence[Mapping[str, Any]],
 ) -> list[tuple[datetime, str, str]]:
-    transitions: list[tuple[datetime, str, str]] = []
-    for history in histories:
-        if not history.get("created"):
-            continue
-        try:
-            created = _parse_jira_datetime(str(history["created"]))
-        except ValueError:
-            continue
-        items = history.get("items", [])
-        if not isinstance(items, list):
-            continue
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            field = str(item.get("fieldId") or item.get("field") or "").casefold()
-            if field != "status":
-                continue
-            transitions.append(
-                (
-                    created,
-                    str(item.get("fromString") or "Unknown"),
-                    str(item.get("toString") or "Unknown"),
-                )
-            )
-    return sorted(transitions)
+    return status_transitions(histories)
 
 
 def _recent_status_change(
@@ -586,40 +678,27 @@ def _current_blocked_duration(
     histories: Sequence[Mapping[str, Any]],
     blocked_statuses: frozenset[str],
     now: datetime | None = None,
+    created: datetime | None = None,
+    current_status: str = "",
 ) -> str | None:
-    blocked_since: datetime | None = None
-    for created, previous, current in _status_transitions(histories):
-        previous_is_blocked = previous.strip().casefold() in blocked_statuses
-        current_is_blocked = current.strip().casefold() in blocked_statuses
-        if current_is_blocked and not previous_is_blocked:
-            blocked_since = created
-        elif not current_is_blocked:
-            blocked_since = None
+    intervals = status_intervals(
+        histories,
+        created,
+        current_status or _last_transition_status(histories),
+        now,
+    )
+    blocked_since = continuous_entry(intervals, blocked_statuses)
     if blocked_since is None:
         return None
-
     current_time = now or datetime.now(timezone.utc)
     if current_time.tzinfo is None:
         current_time = current_time.replace(tzinfo=timezone.utc)
-    elapsed_seconds = max(
-        0,
-        int(
-            (
-                current_time.astimezone(timezone.utc)
-                - blocked_since.astimezone(timezone.utc)
-            ).total_seconds()
-        ),
-    )
-    days, remainder = divmod(elapsed_seconds, 24 * 60 * 60)
-    hours = remainder // (60 * 60)
-    if days == 0 and hours == 0:
-        return "<1 hour"
-    parts = []
-    if days:
-        parts.append(f"{days} {'day' if days == 1 else 'days'}")
-    if hours:
-        parts.append(f"{hours} {'hour' if hours == 1 else 'hours'}")
-    return " ".join(parts)
+    return format_duration(current_time.astimezone(timezone.utc) - blocked_since)
+
+
+def _last_transition_status(histories: Sequence[Mapping[str, Any]]) -> str:
+    transitions = status_transitions(histories)
+    return transitions[-1][2] if transitions else ""
 
 
 def filter_issues_with_recent_activity(
@@ -628,7 +707,7 @@ def filter_issues_with_recent_activity(
     session: requests.Session | None = None,
     now: datetime | None = None,
 ) -> list[dict[str, Any]]:
-    """Keep issues with a recent comment or status transition."""
+    """Keep issues with a recent Jira or formally linked GitHub update."""
     client = session or requests.Session()
     active: list[dict[str, Any]] = []
     for issue in issues:
@@ -636,9 +715,14 @@ def filter_issues_with_recent_activity(
         if not isinstance(fields, dict):
             raise EODReportError("Jira issue is missing its fields object")
         comments = fields.get("comment")
+        worklogs = fields.get("worklog")
         recent_comment = get_recent_comment(
             comments if isinstance(comments, dict) else None, now
         )
+        recent_worklog = get_latest_worklog_text(
+            worklogs if isinstance(worklogs, dict) else None, now
+        )
+        scm_activity = get_recent_scm_activity(issue)
         status_data = fields.get("status")
         normalized_status = (
             str(status_data.get("name") or "").strip().casefold()
@@ -648,18 +732,33 @@ def filter_issues_with_recent_activity(
         is_blocked = normalized_status in config.blocked_statuses
         histories = None
         status_change = None
-        if not recent_comment or is_blocked:
+        if (
+            not recent_comment and not recent_worklog and not scm_activity
+        ) or is_blocked:
             histories = _fetch_issue_changelog(
                 str(issue.get("key", "Unknown")), config, client
             )
-        if not recent_comment and histories is not None:
+        if (
+            not recent_comment
+            and not recent_worklog
+            and not scm_activity
+            and histories is not None
+        ):
             status_change = _recent_status_change(histories, now)
-        if recent_comment or status_change:
+        if recent_comment or recent_worklog or status_change or scm_activity:
             active_issue = dict(issue)
             active_issue["_eod_status_change"] = status_change
             if is_blocked and histories is not None:
                 active_issue["_eod_blocked_duration"] = _current_blocked_duration(
-                    histories, config.blocked_statuses, now
+                    histories,
+                    config.blocked_statuses,
+                    now,
+                    created=issue_created(fields),
+                    current_status=(
+                        str(status_data.get("name") or "")
+                        if isinstance(status_data, dict)
+                        else ""
+                    ),
                 )
             active.append(active_issue)
     return active
@@ -680,6 +779,8 @@ def _ai_issue_context(
     status = fields.get("status")
     comment_data = fields.get("comment")
     comments = comment_data if isinstance(comment_data, dict) else None
+    worklog_data = fields.get("worklog")
+    worklogs = worklog_data if isinstance(worklog_data, dict) else None
     blocked_since = issue.get("_eod_blocked_since")
     try:
         blocked_since_at = (
@@ -711,9 +812,11 @@ def _ai_issue_context(
             else "Unknown"
         ),
         "recent_comments": get_recent_comments(comments)[-10:],
+        "recent_worklogs": get_recent_worklogs(worklogs)[-10:],
         "blocked_period_comments": blocked_period_comments,
         "latest_comment": get_latest_comment(comments),
         "recent_status_change": issue.get("_eod_status_change"),
+        "recent_source_control_activity": get_recent_scm_activity(issue)[-20:],
     }
     if blocked_period_only:
         context["description"] = ""
@@ -843,21 +946,34 @@ def generate_ai_updates(
             continue
         assignee = fields.get("assignee")
         comment_data = fields.get("comment")
+        worklog_data = fields.get("worklog")
         recent_comment = get_recent_comment(
             comment_data if isinstance(comment_data, dict) else None
         )
+        recent_worklog = get_latest_worklog_text(
+            worklog_data if isinstance(worklog_data, dict) else None
+        )
+        scm_activity = get_recent_scm_activity(issue)
         if is_release_blocker:
             pass
         elif include_all_started:
             latest_comment = get_latest_comment(
                 comment_data if isinstance(comment_data, dict) else None
             )
-            if not recent_comment and not (
-                status == "rejected" and latest_comment
+            if (
+                not recent_comment
+                and not recent_worklog
+                and not scm_activity
+                and not (status == "rejected" and latest_comment)
             ):
                 continue
-        elif status in config.done_statuses or (
-            not isinstance(assignee, dict) and not recent_comment
+        elif (
+            status in config.done_statuses and not scm_activity
+        ) or (
+            not isinstance(assignee, dict)
+            and not recent_comment
+            and not recent_worklog
+            and not scm_activity
         ):
             continue
         contexts.append(
@@ -868,12 +984,19 @@ def generate_ai_updates(
         batch = contexts[offset : offset + 8]
         expected_keys = {item["key"] for item in batch}
         prompt = (
-            "Create executive-readable EOD updates from the Jira data below. Each "
+            "Create executive-readable EOD updates from the Jira and linked GitHub "
+            "data below. Compare Jira statements with pull-request and commit facts. "
+            "Each "
             "update must be one direct sentence of at most 20 words, focused on the "
             "latest concrete outcome, change, or current state. Do not repeat the "
             "ticket key or title. Remove greetings, chronology, names, hedging, and "
             "phrases such as 'the team reported'. Use only facts in the summary, "
-            "description, status, and recent comments. Do not infer work, causes, "
+            "description, status, recent comments, worklogs, pull requests, and "
+            "commits. Add "
+            "concrete implementation detail from source activity when available. "
+            "Never infer completion merely from code, a commit, or pull-request "
+            "existence. When no recent Jira comment exists, summarize the latest "
+            "concrete pull-request or commit activity. Do not infer work, causes, "
             "owners, dates, or dependencies that are not explicit. For blocked "
             "issues, use blocked_period_comments to identify an explicit cause "
             "recorded earlier in the current blocked period. For blocked "
@@ -1001,10 +1124,20 @@ def _issue_item(
     ticket_url = f"{config.jira_base_url}/browse/{quote(key, safe='-')}"
     link = f"[{key}]({ticket_url}) {summary}"
     comment_data = fields.get("comment")
+    worklog_data = fields.get("worklog")
     recent_comment = get_recent_comment(
         comment_data if isinstance(comment_data, dict) else None
     )
-    if assignee == "Unassigned" and not recent_comment:
+    recent_worklog = get_latest_worklog_text(
+        worklog_data if isinstance(worklog_data, dict) else None
+    )
+    scm_text = get_latest_scm_text(issue)
+    if (
+        assignee == "Unassigned"
+        and not recent_comment
+        and not recent_worklog
+        and not scm_text
+    ):
         return None
     ai_update = ai_updates.get(key)
 
@@ -1012,7 +1145,10 @@ def _issue_item(
         reason = (
             ai_update.blocker_reason or "No explicit blocker reason was found."
             if ai_update
-            else recent_comment or "No recent comment logged explaining the blocker."
+            else recent_comment
+            or recent_worklog
+            or scm_text
+            or "No recent comment logged explaining the blocker."
         )
         context = f"\n  > *Context:* {ai_update.update}" if ai_update else ""
         return assignee, ReportItem(
@@ -1021,7 +1157,11 @@ def _issue_item(
             f"  > ⚠️ *Blocker reason:* {reason}",
         )
     if normalized_status in config.deploy_statuses:
-        deployment_update = ai_update.update if ai_update else recent_comment
+        deployment_update = (
+            ai_update.update
+            if ai_update
+            else recent_comment or recent_worklog or scm_text
+        )
         note = (
             f"\n  > 🚀 *Deployment note:* {deployment_update}"
             if deployment_update
@@ -1034,7 +1174,10 @@ def _issue_item(
     update = (
         ai_update.update
         if ai_update
-        else recent_comment or "No update comment logged in the last 24 hours."
+        else recent_comment
+        or recent_worklog
+        or scm_text
+        or "No update comment logged in the last 24 hours."
     )
     return assignee, ReportItem(
         3,
@@ -1108,11 +1251,21 @@ def parse_and_format_by_status(
         if not isinstance(fields, dict):
             raise EODReportError("Jira issue is missing its fields object")
         comments = fields.get("comment")
+        worklogs = fields.get("worklog")
         recent_comment = get_recent_comment(
             comments if isinstance(comments, dict) else None
         )
+        recent_worklog = get_latest_worklog_text(
+            worklogs if isinstance(worklogs, dict) else None
+        )
+        scm_text = get_latest_scm_text(issue)
         status_change = issue.get("_eod_status_change")
-        if not recent_comment and not isinstance(status_change, str):
+        if (
+            not recent_comment
+            and not recent_worklog
+            and not scm_text
+            and not isinstance(status_change, str)
+        ):
             continue
 
         key = str(issue.get("key", "Unknown"))
@@ -1182,8 +1335,12 @@ def parse_and_format_by_status(
             ):
                 rejection_reason = "No rejection reason recorded."
             details.append(f"  > *Rejection reason:* {rejection_reason}")
-        elif recent_comment:
-            activity = ai_update.update if ai_update else recent_comment
+        elif recent_comment or recent_worklog or scm_text:
+            activity = (
+                ai_update.update
+                if ai_update
+                else recent_comment or recent_worklog or scm_text
+            )
             details.append(f"  > *Update:* {activity}")
         if group == "Blocked":
             blocked_duration = issue.get("_eod_blocked_duration")
@@ -1205,7 +1362,9 @@ def parse_and_format_by_status(
         row = f"* {link} — *Assignee: {assignee}*"
         if details:
             row += "\n" + "\n".join(details)
-        groups[group].append((bool(recent_comment), row))
+        groups[group].append(
+            (bool(recent_comment or recent_worklog or scm_text), row)
+        )
 
     lines = [
         f"## 🌇 EOD Progress Report — **{config.team_region} Team**",
