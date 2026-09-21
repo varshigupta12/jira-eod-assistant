@@ -1,6 +1,9 @@
 import unittest
+from contextlib import redirect_stderr
 from datetime import datetime, timezone
+from io import StringIO
 from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from eod_report import AIUpdate, Config
 from format_c_report import (
@@ -10,8 +13,10 @@ from format_c_report import (
     _select_active_sprints,
     format_format_c,
     group_format_c_issues,
+    load_format_c_groups,
 )
 from pulse_report import PulseConfig
+from source_control import SourceControlError
 
 
 ENV = {
@@ -199,6 +204,63 @@ class FormatTests(unittest.TestCase):
             '> *"staging-service\\*-dev" enabled*',
             report,
         )
+
+    def test_uses_latest_scm_text_and_appends_three_source_links(self):
+        config = Config.from_env(ENV)
+        ticket = issue("ENG-1", "In Progress")
+        ticket["_eod_scm_activity"] = [
+            {
+                "source": "commit",
+                "timestamp": f"2026-09-21T0{index}:00:00+00:00",
+                "text": f"Implementation detail {index}",
+                "url": f"https://github.com/acme/repo/commit/{index}",
+                "repository": "acme/repo",
+                "reference": f"@sha000{index}",
+            }
+            for index in range(1, 5)
+        ]
+        group = EpicGroup(
+            "ENG-100",
+            "Improve reporting",
+            EpicProgress(20, "1 / 5 tickets done"),
+            (ticket,),
+        )
+
+        report = format_format_c((group,), ("Sprint 42",), config)
+
+        self.assertIn("Implementation detail 4", report)
+        self.assertNotIn("acme/repo@sha0001", report)
+        for index in (2, 3, 4):
+            self.assertIn(f"acme/repo@sha000{index}", report)
+
+    def test_linked_activity_failure_warns_and_keeps_jira_only_groups(self):
+        config = Config.from_env(ENV)
+        pulse_config = PulseConfig.from_env(ENV)
+        team = SimpleNamespace(
+            id="apac", name="APAC", board_ids=(101,)
+        )
+        stderr = StringIO()
+        with patch(
+            "format_c_report._field_ids", return_value=((), ())
+        ), patch(
+            "format_c_report._fetch_active_sprint_issues",
+            return_value=([issue("ENG-1", "In Progress", comment="Progress")], ("S",)),
+        ), patch(
+            "format_c_report.annotate_github_activity",
+            side_effect=SourceControlError("Linked activity request failed: HTTP 503"),
+        ), redirect_stderr(stderr):
+            groups, _ = load_format_c_groups(
+                team,
+                config,
+                pulse_config,
+                Mock(),
+                github_organization="acme",
+                github_token="token",
+            )
+
+        self.assertEqual(groups[0].issues[0]["key"], "ENG-1")
+        self.assertIn("using Jira activity only", stderr.getvalue())
+        self.assertNotIn("https://", stderr.getvalue())
 
 
 if __name__ == "__main__":
